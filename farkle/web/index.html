@@ -110,9 +110,18 @@
             </tr>
             <tr>
               <th>Points / turn</th>
-              <td>What one turn with that set is worth on average, playing
-                  perfectly. Computed exactly &mdash; no simulation. Shown as the
-                  secondary figure, since points alone ignore how often you bust.</td>
+              <td>The <b>mean</b> banked in one turn under unlimited points-max
+                  play, computed exactly &mdash; no simulation. A rare tail of
+                  hot-dice runs drags it well above a typical turn, so read it as
+                  a diagnostic, not a score to expect.</td>
+            </tr>
+            <tr>
+              <th>Turn spread</th>
+              <td>Open a set to see how that mean breaks down: the <b>median</b>
+                  turn, the middle-half range, how often a turn <b>busts</b>
+                  (banks nothing), and what it averages <em>when</em> it banks.
+                  For strong, aggressive sets the median sits far below the mean
+                  &mdash; that gap is exactly why the mean alone misleads.</td>
             </tr>
             <tr>
               <th>Optimal strategy</th>

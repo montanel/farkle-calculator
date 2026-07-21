@@ -388,6 +388,39 @@ function strategyRows(bankAt, shape) {
   return out;
 }
 
+/* The shape behind the single "points / turn" mean. `turn_ev` is that mean, and
+   for aggressive sets it is unrepresentative: a big slice of turns bust (bank 0)
+   while a rare hot-dice tail drags the average far above a typical turn. Showing
+   the median, the middle-half range, the bust rate and the mean-when-it-banks
+   makes that skew visible instead of trusting one flattering number. */
+function turnDistBlock(td, turnEv) {
+  if (!td) return '';
+  const n = (x) => Math.round(x).toLocaleString();
+  const pct = (x) => `${(x * 100).toFixed(0)}%`;
+  const cond = td.cond_mean === null || td.cond_mean === undefined
+    ? '&mdash;' : n(td.cond_mean);
+  return `
+    <div class="turndist">
+      <div class="td-grid">
+        <div class="td-stat">
+          <span class="td-num">${n(td.median)}</span>
+          <span class="td-lab">median turn</span></div>
+        <div class="td-stat">
+          <span class="td-num">${n(td.p25)}&ndash;${n(td.p75)}</span>
+          <span class="td-lab">middle half</span></div>
+        <div class="td-stat">
+          <span class="td-num ${td.bust >= 0.3 ? 'risky' : ''}">${pct(td.bust)}</span>
+          <span class="td-lab">turns bust</span></div>
+        <div class="td-stat">
+          <span class="td-num">${cond}</span>
+          <span class="td-lab">avg when it banks</span></div>
+      </div>
+      <p class="td-note">Mean <b>${n(turnEv)}</b> pts is the average under
+        <em>unlimited points-max play</em> &mdash; pulled up by a rare huge tail,
+        not a score to expect. The <b>median</b> is what a typical turn banks.</p>
+    </div>`;
+}
+
 /* "Aranka's die, Aranka's die, Fer die" -> "Aranka's die x2, Fer die". */
 function handName(dice) {
   const seen = new Map();
@@ -444,6 +477,7 @@ function paintResults() {
             </div>
           </summary>
           <div class="strategy">
+            ${turnDistBlock(r.turn_dist, r.turn_ev)}
             <p class="playline">
               <button class="btn-sm play" data-i="${i}">&#9656; Play along &mdash;
                 enter each throw, be told what to keep</button>

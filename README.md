@@ -276,6 +276,30 @@ Rolling a lone fair die busts exactly 4/6 of the time and is still correct below
 the threshold, since scoring on it triggers hot dice and returns the full hand.
 The UI shows both columns side by side for this reason.
 
+### The shape of a turn, not just its mean
+
+`turn_ev` is the **mean** of the per-turn banked score under the points-max
+policy, and for a strong set that single number lies about a typical turn. The
+policy is aggressive — it keeps rolling while the expected roll beats the tally —
+so the turn distribution is a big lump of busts at 0 plus a long tail of huge
+hot-dice runs. The mean is exact but sits well above what you usually bank.
+
+`turn_distribution` bucketises the same forward pass `_turn_shape` runs — by how
+much a turn banks rather than by how many dice it ends holding — and reports the
+shape: the bust probability (mass at 0), the 25th/50th/75th percentiles (busts
+counted as a banked 0), and the **conditional mean given the turn banked at all**.
+It is still exact; no sampling. For six Heavenly Kingdom dice:
+
+| bust | 25th pct | median | 75th pct | mean (`turn_ev`) | mean when it banks |
+|---|---|---|---|---|---|
+| 36.9% | 0 | 1,200 | 2,100 | 1,424 | 2,258 |
+
+Over a third of turns bank nothing, so the 25th percentile is a flat 0 and the
+median turn (1,200) sits far below both the mean and the mean-when-it-banks. The
+UI shows these next to `turn_ev` and labels the mean *"under unlimited points-max
+play"* — a diagnostic, not a score to expect. (The mean equals `turn_ev` by
+construction, which the tests pin.)
+
 ### The play-along advisor
 
 The threshold table answers "when do I stop?", but the question the player

@@ -167,6 +167,7 @@ def turn_ev(dice_probs, want_policy=False, names=None):
         result["bank_at"] = _bank_thresholds(V, names)
         result["shape"] = _turn_shape(V, dice_probs, work=work)
         result["turns_to_win"] = turns_to_win(V, work)
+        result["turn_dist"] = turn_distribution(V, work)
     return result
 
 
@@ -385,6 +386,53 @@ def _banked_distribution(V, work):
             if mass[base + ti]:
                 banked[ti * STEP] = banked.get(ti * STEP, 0.0) + mass[base + ti]
     return banked
+
+
+def _quantile(items, total, p):
+    """Inverse CDF of a discrete distribution: the smallest score whose
+    cumulative mass reaches p * total.
+
+    `items` is (score, probability) sorted ascending. Busts sit at score 0, so a
+    set that busts more than half its turns yields a median of 0 -- which is the
+    whole point of surfacing this, since the mean can be many times a median of
+    nothing.
+    """
+    threshold = p * total
+    acc = 0.0
+    for score, prob in items:
+        acc += prob
+        if acc >= threshold - 1e-12:
+            return score
+    return items[-1][0] if items else 0
+
+
+def turn_distribution(V, work):
+    """Shape of the per-turn banked score, not just its mean.
+
+    `turn_ev` is the mean of exactly this distribution, and for strong sets that
+    mean is wildly unrepresentative: a large mass busts (banks 0) while a fat
+    tail of hot-dice runs drags the average far above what a typical turn banks.
+    Reporting the bust probability, the quartiles (busts counted as a banked 0,
+    so an over-half bust rate shows a median of 0) and the mean *conditional on
+    banking anything* makes the skew visible instead of hiding it behind one
+    optimistic number.
+
+    Exact throughout -- a bucketed forward pass over the same policy, no sampling.
+    """
+    banked = _banked_distribution(V, work)
+    total = sum(banked.values())
+    bust = banked.get(0, 0.0)
+    mean = sum(score * p for score, p in banked.items())
+    live = total - bust                      # mass that banks something
+    items = sorted(banked.items())
+    return {
+        "bust": bust,
+        "p25": _quantile(items, total, 0.25),
+        "median": _quantile(items, total, 0.50),
+        "p75": _quantile(items, total, 0.75),
+        "mean": mean,                        # == turn_ev, by construction
+        "cond_mean": mean / live if live > 0 else None,
+    }
 
 
 def turns_to_win(V, work, targets=WIN_TARGETS):
@@ -750,11 +798,20 @@ def optimize(inventory, dice_lookup, refine=20, progress=None, fill_die=None):
     out = []
     for k, (ev1, counts) in enumerate(todo):
         res = solved[k]
+        td = res["turn_dist"]
         out.append({
             "dice": jobs[k][2],
             "counts": [[pool_names[i], c] for i, c in enumerate(counts) if c],
             "turn_ev": round(res["turn_ev"], 1),
             "turns_to_win": {t: round(v, 2) for t, v in res["turns_to_win"].items()},
+            # The mean (turn_ev) alone flatters an aggressive set; ship the shape
+            # behind it so the UI can show the skew rather than hide it.
+            "turn_dist": {
+                "bust": round(td["bust"], 4),
+                "p25": td["p25"], "median": td["median"], "p75": td["p75"],
+                "cond_mean": (round(td["cond_mean"], 1)
+                              if td["cond_mean"] is not None else None),
+            },
             "bank_at": res["bank_at"],
             "shape": res["shape"],
         })

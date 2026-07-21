@@ -334,6 +334,62 @@ def test_turns_to_win():
     check("never-bust dice win 4000 in one turn", round(at[4000], 6), 1.0)
 
 
+def test_turn_distribution():
+    """The shape behind turn_ev: bust rate, quartiles, conditional mean.
+
+    turn_ev is the *mean* of the per-turn banked score, and for strong sets that
+    mean is unrepresentative -- a big bust mass plus a fat hot-dice tail. These
+    pins keep the surfaced distribution honest and tied to the same policy.
+    """
+    print("\nTurn distribution (the skew behind turn_ev)")
+    ROW = solver.ROW
+    names = ["Ordinary die", "Heavenly Kingdom die",
+             "Die of misfortune", "Weighted die"]
+
+    worst_sum = worst_bust = worst_mean = 0.0
+    order_bad, median_bad = [], []
+    for name in names:
+        dp = [DICE_PROBS[name]] * 6
+        work = solver._work_lists(dp)
+        V = solver.value_table(dp, work)
+        td = solver.turn_distribution(V, work)
+        banked = solver._banked_distribution(V, work)
+        shape = solver._turn_shape(V, dp, work=work)
+
+        worst_sum = max(worst_sum, abs(sum(banked.values()) - 1.0))
+        worst_bust = max(worst_bust, abs(td["bust"] - shape["bust"]))
+        worst_mean = max(worst_mean, abs(td["mean"] - V[FULL_HAND * ROW]))
+        if not td["p25"] <= td["median"] <= td["p75"]:
+            order_bad.append((name, td["p25"], td["median"], td["p75"]))
+        # A right-skewed turn banks less at the median than it averages once it
+        # banks at all; the conditional mean strips out the busts that drag the
+        # median down, so it can never sit below the median.
+        if td["cond_mean"] is None or td["median"] > td["cond_mean"] + 1e-9:
+            median_bad.append((name, td["median"], td["cond_mean"]))
+
+    close("banked probabilities sum to 1", worst_sum, 0.0, 1e-9)
+    close("mean equals turn_ev", worst_mean, 0.0, 1e-6)
+    close("bust mass matches _turn_shape", worst_bust, 0.0, 1e-9)
+    check("quartiles ordered p25 <= median <= p75", order_bad, [])
+    check("median <= conditional mean", median_bad, [])
+
+    # The honesty fix in one set: six Heavenly Kingdom dice bust over a third of
+    # turns, so a full quarter bank nothing (p25 = 0) and the median turn (1200)
+    # is far below both the mean (turn_ev ~1424) and the mean-when-it-banks
+    # (~2258). turn_ev alone would badly misrepresent a typical turn.
+    dp = [DICE_PROBS["Heavenly Kingdom die"]] * 6
+    work = solver._work_lists(dp)
+    V = solver.value_table(dp, work)
+    td = solver.turn_distribution(V, work)
+    check("strong set: a quarter of turns bank nothing", td["p25"], 0)
+    ok = td["median"] < V[FULL_HAND * ROW] < td["cond_mean"]
+    if not ok:
+        FAILED.append(f"expected median < turn_ev < cond_mean, got "
+                      f"{td['median']} < {V[FULL_HAND * ROW]:.0f} < {td['cond_mean']:.0f}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'median < turn_ev < mean-when-it-banks':<44} "
+          f"{td['median']} < {V[FULL_HAND * ROW]:.0f} < {td['cond_mean']:.0f}")
+
+
 def test_advisor():
     print("\nPlay-along advisor")
     fair = [DICE_PROBS["Ordinary die"]] * 6
@@ -510,6 +566,7 @@ if __name__ == "__main__":
     test_probability_tables()
     test_solver_values()
     test_turns_to_win()
+    test_turn_distribution()
     test_advisor()
     test_ranking_matches_bruteforce()
     test_pool_and_autofill()
