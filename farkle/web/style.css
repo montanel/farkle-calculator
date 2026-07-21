@@ -1,0 +1,465 @@
+/* Kingdom Come: Deliverance II interface styling.
+
+   The red damask, blue diamond panel, carved brass frame AND the typefaces are
+   the game's own assets, taken from the wiki's KCD2 theme rather than redrawn:
+   textures from Kcd2_sec_bg_extrawide.png / KCD2_pattern_blue_bg.jpg /
+   Kcd2_item_border.png (with the wiki's slice values), and the fonts from the
+   wiki's MediaWiki:Fonts.css -- the actual Kingdom Come family. */
+
+@font-face {
+  font-family: "Kingdom Come";
+  src: url("fonts/Kingdom_Come_Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Kingdom Come";
+  src: url("fonts/Kingdom_Come_Bold.woff2") format("woff2");
+  font-weight: 600 800; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Kingdom Come";
+  src: url("fonts/Kingdom_Come_Italic.woff2") format("woff2");
+  font-weight: 400; font-style: italic; font-display: swap;
+}
+@font-face {
+  font-family: "Kingdom Come Display";
+  src: url("fonts/Kingdom_Come_Display.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+
+:root {
+  /* Muted warm gold -- the game's lettering is soft, not a bright highlight. */
+  --gold:        #cbb07c;
+  --gold-bright: #e2cfa1;
+  --gold-dim:    #8d7439;
+  --sel:         #d3b464;   /* painted selection bar */
+  --sel-ink:     #3c2d11;
+
+  --red:         #6d1a17;
+  --red-hi:      #822220;
+  --red-dark:    #4a100f;
+  --red-edge:    #260706;
+
+  --slate:       #32404d;
+  --slate-lo:    #29343e;
+
+  --ink:         #e8e2d4;
+  --ink-dim:     #93a3b3;
+  --value:       #c3cedb;
+  --rule:        #5a6d7f33;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 20px 16px 60px;
+  font-family: "Kingdom Come", Georgia, "Times New Roman", serif;
+  font-variant-numeric: lining-nums;
+  color: var(--ink);
+  background: #141b21 url("img/KCD2_pattern_blue_bg.jpg") center / 1400px auto repeat fixed;
+  min-height: 100vh;
+}
+body::before {              /* darken the page so panels read as lit */
+  content: ""; position: fixed; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse at 50% 0%, #0d131899 0%, #080c10e0 70%, #05080b 100%);
+}
+.wrap { max-width: 1240px; margin: 0 auto; position: relative; }
+
+/* --- Panel + carved brass frame ------------------------------------------- */
+.frame {
+  position: relative;
+  /* Anchored top-left, NOT centred. With `center` the tile origin sits at 50%
+     of the box, so expanding a result row moved the whole damask by half the
+     height change -- the pattern appeared to jump when you clicked. */
+  background: var(--slate) url("img/KCD2_pattern_blue_bg.jpg") top left / 900px auto repeat;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .6);
+}
+/* Drawn as an overlay so the ornate corners never affect layout. */
+.frame::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  border: 34px solid transparent;
+  border-image: url("img/Kcd2_item_border.png") 310 270 310 270 stretch;
+}
+
+/* --- Oxblood bars --------------------------------------------------------- */
+.bar {
+  position: relative; z-index: 1;
+  padding: 12px 22px;
+  color: var(--ink);
+  letter-spacing: .02em;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, .85);
+  background: var(--red) url("img/Kcd2_sec_bg_extrawide.png") center / cover no-repeat;
+  border-bottom: 1px solid var(--red-edge);
+}
+/* The game titles its screens in wide-tracked caps; headers here follow. */
+.bar h1, .bar h2, .bar h3 { margin: 0; font-weight: 400;
+                            text-transform: uppercase; }
+.bar h1 { font-family: "Kingdom Come Display", "Kingdom Come", Georgia, serif;
+          font-size: 26px; letter-spacing: .1em; text-align: center; }
+.bar h2 { font-size: 17px; letter-spacing: .12em; }
+.bar h3 { font-size: 14px; letter-spacing: .12em; }
+/* A header that carries a control on the right -- the wager the sets rank for. */
+.bar--split { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.target-pick { display: inline-flex; align-items: center; gap: 7px;
+               font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
+               color: var(--ink); text-shadow: 0 2px 4px rgba(0, 0, 0, .85); }
+.target-pick select.btn-sm { text-shadow: none; }
+.bar--title { padding: 16px 22px; }
+
+/* --- Layout --------------------------------------------------------------- */
+.cols {
+  display: grid; grid-template-columns: 1.25fr 1fr;
+  gap: 18px; margin-top: 18px; align-items: stretch;
+}
+@media (max-width: 940px) { .cols { grid-template-columns: 1fr; } }
+
+/* Both columns are the same fixed height, so the two panels always align. */
+.frame--panel { display: flex; flex-direction: column; height: 660px; }
+.frame--panel .scroll { flex: 1 1 auto; min-height: 0; }
+
+.body { padding: 12px 18px; position: relative; z-index: 1; }
+
+/* --- Inputs & buttons ----------------------------------------------------- */
+.search {
+  width: 100%; padding: 10px 12px;
+  font-family: inherit; font-size: 16px; color: var(--ink);
+  background: #222d36cc; border: 1px solid var(--gold-dim); outline: none;
+}
+.search:focus { border-color: var(--gold); box-shadow: 0 0 7px rgba(203, 176, 124, .35); }
+.search::placeholder { color: #7a8996; font-style: italic; }
+
+.btn {
+  display: block; width: 100%; padding: 12px;
+  font-family: inherit; font-size: 16px;
+  text-transform: uppercase; letter-spacing: .12em;
+  color: var(--ink); text-shadow: 0 2px 4px rgba(0, 0, 0, .85);
+  background: var(--red) url("img/Kcd2_sec_bg_extrawide.png") center / cover;
+  border: 1px solid var(--gold-dim); cursor: pointer;
+}
+.btn:hover:not(:disabled) { filter: brightness(1.22); }
+.btn:disabled { opacity: .5; cursor: default; }
+
+/* Small buttons hover to the game's painted-gold selected state. */
+.btn-sm {
+  font-family: inherit; font-size: 12px; color: var(--gold);
+  text-transform: uppercase; letter-spacing: .08em;
+  padding: 5px 10px; background: #2a2114cc;
+  border: 1px solid var(--gold-dim); cursor: pointer;
+}
+.btn-sm:hover:not(:disabled) { background: var(--sel); color: var(--sel-ink);
+                               border-color: #a88943; }
+.btn-sm:disabled { opacity: .35; cursor: default; }
+select.btn-sm { padding: 5px; text-transform: none; letter-spacing: normal;
+                font-size: 13px; }
+select.btn-sm:hover { background: #3d2f1acc; color: var(--gold-bright); }
+
+.btn-danger { color: #c98f86; border-color: #7a3b34; }
+.btn-danger:hover:not(:disabled) { background: #4a1f1acc; color: #e8b3aa;
+                                   border-color: #a2544a; }
+
+/* --- Dice rows ------------------------------------------------------------ */
+/* Rows sit transparent over the panel pattern, as in game -- no striping. */
+.scroll { overflow-y: auto; overflow-x: hidden; padding: 4px 10px 8px; position: relative; z-index: 1; }
+
+.die {
+  display: grid; grid-template-columns: 54px 1fr auto;
+  align-items: center; gap: 12px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+}
+.die > div { min-width: 0; }   /* let long descriptions ellipsis instead of stretching */
+/* Hover tints warm, like the game's list selector, not neutral white. */
+.die:hover { background: #cbb07c14; border-color: #cbb07c2b; }
+/* Owning a die is marked with a quiet edge and the count itself. The chest
+   panel is what shows your collection -- repeating it here in gold made the
+   two panels read as the same list twice. */
+.die.is-chosen { border-left: 2px solid var(--gold-dim); background: #ffffff08; }
+.die.is-chosen .die-name { color: var(--gold-bright); }
+.die.is-blocked { opacity: .38; }
+
+.die img { width: 46px; height: 46px; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, .6)); }
+.die-name { font-size: 17px; color: var(--gold); }
+/* Kept faint until hover so 43 rows do not turn into 43 links shouting at you. */
+.wiki {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--ink-dim); text-decoration: none; vertical-align: 1px;
+  margin-left: 6px; padding: 1px 4px; border: 1px solid #ffffff1f;
+  opacity: 0; transition: opacity .1s;
+}
+/* :focus-visible, not :focus -- a mouse click leaves the link focused, which
+   with :focus would strand the box on screen until you clicked elsewhere.
+   Keyboard focus still reveals it. */
+.die:hover .wiki, .wiki:focus-visible { opacity: 1; }
+.wiki:hover { color: var(--gold-bright); border-color: var(--gold-dim);
+              background: #2a211499; }
+.die-sub { font-size: 12.5px; color: var(--ink-dim); font-style: italic;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+
+/* --- Quantity stepper ----------------------------------------------------- */
+/* Deliberately understated: picking a die is the task, adjusting the count is
+   a small correction, so the stepper should not compete with the die itself. */
+.qty { display: flex; align-items: center; gap: 2px; }
+.qty button {
+  width: 20px; height: 20px; line-height: 1; padding: 0;
+  font-family: inherit; font-size: 12px; color: var(--gold);
+  background: #2a211499; border: 1px solid #8d743966; cursor: pointer;
+}
+.qty button:hover:not(:disabled) { background: #3d2f1a; color: var(--gold-bright);
+                                   border-color: var(--gold-dim); }
+.qty button:disabled { opacity: .25; cursor: default; }
+.qty span { min-width: 18px; text-align: center; font-size: 13px; color: var(--ink-dim); }
+.die.is-chosen .qty span { color: var(--gold-bright); font-weight: 700; }
+
+/* --- Chest tiles ---------------------------------------------------------- */
+/* Compact, icon-first, count-badged: what you own, not what each die does. */
+.tiles { display: grid; gap: 8px;
+         grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
+.tile {
+  position: relative; text-align: center; padding: 9px 4px 6px;
+  border: 1px solid #ffffff14; background: #0000002e;
+}
+.tile:hover { background: #ffffff12; border-color: #ffffff2b; }
+.tile img { width: 44px; height: 44px;
+            filter: drop-shadow(0 2px 3px rgba(0, 0, 0, .6)); }
+.tile-name { display: block; font-size: 11.5px; color: var(--ink-dim);
+             margin-top: 3px; overflow: hidden; text-overflow: ellipsis;
+             white-space: nowrap; }
+.badge {
+  position: absolute; top: 3px; right: 3px; min-width: 19px;
+  padding: 1px 4px; font-size: 12px; font-weight: 700;
+  color: var(--sel-ink); background: var(--sel); border: 1px solid #00000059;
+}
+/* The steppers stay out of the way until the tile is hovered. */
+.tile-qty { display: flex; justify-content: center; gap: 4px; margin-top: 5px;
+            opacity: 0; transition: opacity .1s; }
+.tile:hover .tile-qty, .tile:focus-within .tile-qty { opacity: 1; }
+.tile-qty button {
+  width: 24px; height: 21px; line-height: 1;
+  font-family: inherit; font-size: 14px; color: var(--gold);
+  background: #2a2114cc; border: 1px solid var(--gold-dim); cursor: pointer;
+}
+.tile-qty button:hover:not(:disabled) { background: #3d2f1a; color: var(--gold-bright); }
+.tile-qty button:disabled { opacity: .3; cursor: default; }
+
+/* --- Tally & presets ------------------------------------------------------ */
+.tally {
+  position: relative; z-index: 1;
+  padding: 8px 18px; font-size: 13px; color: var(--ink-dim);
+  border-bottom: 1px solid var(--rule);
+}
+.tally b { color: var(--gold-bright); font-size: 15px; }
+.presets {
+  position: relative; z-index: 1;
+  display: flex; gap: 6px; align-items: center;
+  padding: 9px 18px; border-top: 1px solid var(--rule);
+}
+.presets select { flex: 1 1 auto; min-width: 0; }
+
+/* How many shortlisted sets get the exact treatment. The cheap first-roll
+   ranking is never the final word, so this trades run time against how far
+   down the shortlist the true best set is allowed to hide. */
+.depth {
+  position: relative; z-index: 1;
+  display: flex; gap: 8px; align-items: center; justify-content: flex-end;
+  padding: 9px 18px 0; font-size: 12.5px; color: var(--ink-dim);
+}
+.depth select { flex: 0 1 190px; min-width: 0; }
+
+/* --- Results -------------------------------------------------------------- */
+.result summary { list-style: none; cursor: pointer; }
+.result summary::-webkit-details-marker { display: none; }
+
+.rowline {
+  display: grid; grid-template-columns: 34px 1fr auto;
+  align-items: center; gap: 12px; padding: 9px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.result:nth-child(even) .rowline { background: #ffffff07; }
+/* Must out-specify the :nth-child rule above, or even rows never light up. */
+.rowline:hover,
+.result:nth-child(even) .rowline:hover { background: #ffffff14; }
+/* Opening a row deliberately does *not* recolour it: the strategy panel sliding
+   out is signal enough, and tinting the row made the damask look like it had
+   shifted underneath. Hover still responds. */
+/* The top row is the answer to the question, so it gets a real crown rather
+   than the same thin edge used to mark an owned die in the catalogue. */
+.result.is-best .rowline {
+  background: linear-gradient(90deg, #cbb07c24, #cbb07c0a 55%, transparent);
+  border-top: 1px solid var(--gold-dim);
+  border-bottom: 1px solid var(--gold-dim);
+}
+/* Hover lightens it, as on every other row -- but opening it does not, so the
+   panel does not appear to change colour when you click in. */
+.result.is-best .rowline:hover {
+  background: linear-gradient(90deg, #cbb07c3a, #cbb07c1a 55%, #ffffff0d);
+}
+.result.is-best .rank {
+  background: var(--sel); color: var(--sel-ink); font-weight: 700;
+  border-radius: 2px; box-shadow: 0 1px 3px #0009;
+}
+.result.is-best .score .n { color: var(--gold-bright); font-size: 30px; }
+.result.is-best .score .unit { color: var(--gold); }
+
+.rank { font-size: 17px; color: var(--gold); text-align: center;
+        align-self: center; padding: 2px 0; }
+.setline { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px 2px 2px; font-size: 13.5px; white-space: nowrap;
+  color: var(--gold); background: #ffffff0d; border: 1px solid #ffffff1a;
+}
+.chip img { width: 30px; height: 30px; }
+.chip .x { color: var(--gold-bright); font-weight: 700; }
+
+.score { text-align: right; white-space: nowrap; }
+.score .n { font-size: 27px; color: var(--gold-bright); line-height: 1.05;
+            text-shadow: 0 2px 5px rgba(0, 0, 0, .7); }
+.score .unit { font-size: 10.5px; color: var(--ink-dim);
+               letter-spacing: .07em; text-transform: uppercase; }
+/* The points figure rides below the headline turns-to-win, quieter. */
+.score .sub { font-size: 11.5px; color: var(--ink-dim); margin-top: 3px; }
+
+.strategy { padding: 6px 16px 14px; background: #00000024; }
+.strategy .caption { font-size: 12.5px; color: var(--ink-dim);
+                     font-style: italic; padding: 8px 0; }
+/* Each size row unfolds into the exact hands of that size, in place -- the
+   detail lives where the question ("which five?") comes up. */
+.sizerow { cursor: pointer; }
+.sizerow:hover th, .sizerow:hover td { background: #cbb07c10; }
+.caret { display: inline-block; width: 1em; color: var(--gold-dim);
+         transition: transform .12s; }
+.sizerow.open .caret { transform: rotate(90deg); }
+.subrow { display: none; background: #00000030; }
+.subrow.show { display: table-row; }
+.subrow th { padding-left: 2.2em; font-weight: 400; }
+.subrow td, .subrow th { font-size: 13px; color: var(--ink-dim);
+                         border-top: 1px solid #ffffff0a; }
+/* The specific hand, indented under its "N dice" row and free to wrap so long
+   die names never force the table wide. Kept on the left, like the size row. */
+.subrow .handcell { padding-left: 2.2em; white-space: normal; color: var(--gold); }
+.subrow .handcell .x { color: var(--gold-bright); font-weight: 700; }
+
+/* --- Tables --------------------------------------------------------------- */
+.rows { width: 100%; border-collapse: collapse; }
+.rows th, .rows td { padding: 6px 10px; font-size: 14px; text-align: left;
+                     vertical-align: top; border-top: 1px solid var(--rule); }
+.rows th { color: var(--gold); font-weight: 700; width: 1%; white-space: nowrap; }
+.rows td { color: var(--value); }
+.rows--wide th { width: 22%; white-space: normal; }
+.rows .num { color: var(--gold-bright); font-weight: 700; }
+.rows .always { color: var(--ink-dim); font-style: italic; }
+/* How often a row is reached at all -- right-aligned so it reads as a column
+   of magnitudes rather than competing with the rule itself. */
+.rows .freq { width: 1%; white-space: nowrap; text-align: right;
+              font-size: 12.5px; color: var(--ink-dim); }
+.rows .freq .risky { color: #c98f86; }
+.rows .colhead th { color: var(--ink-dim); font-size: 11px; font-weight: 600;
+                    letter-spacing: .09em; text-transform: uppercase;
+                    border-top: none; }
+
+/* --- Hover tooltip (the game's Item Info card) ---------------------------- */
+#tip {
+  position: fixed; z-index: 50; width: 268px;
+  pointer-events: none; display: none;
+  background: var(--slate) url("img/KCD2_pattern_blue_bg.jpg") center / 700px auto;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .8);
+  border: 1px solid var(--gold-dim);
+}
+#tip .bar { padding: 8px 14px; font-size: 16px; }
+#tip .tip-body { padding: 11px 14px; }
+#tip .desc { font-size: 12.5px; color: var(--ink-dim); font-style: italic; margin: 0 0 9px; }
+
+.face { display: grid; grid-template-columns: 16px 1fr 44px;
+        align-items: center; gap: 8px; margin: 4px 0; font-size: 12.5px; }
+.face .pip { color: var(--gold); text-align: right; }
+.face .track { height: 10px; background: #1b242cbb; border: 1px solid #55657a80; }
+/* display:block matters: an inline span ignores width and height entirely,
+   which is why these bars once rendered empty. */
+.face .fill { display: block; height: 100%; min-width: 2px;
+              background: linear-gradient(90deg, var(--gold-dim), var(--gold)); }
+.face .pct { color: var(--value); text-align: right; font-family: Consolas, monospace; }
+.face.is-scoring .pip { color: var(--sel); font-weight: 700; }
+
+/* --- Play-along advisor --------------------------------------------------- */
+.playline { padding: 8px 0 2px; }
+/* The advisor is the direct answer to "what do I do?", so its opener reads a
+   notch brighter than the utility buttons around it. */
+.play { color: var(--gold-bright); border-color: var(--gold-dim);
+        background: #3a2e1699; }
+.play:hover:not(:disabled) { background: #4a3c1ecc; }
+
+.adv-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 2px 0 10px;
+             border-bottom: 1px solid var(--rule); }
+.adv-score { display: flex; align-items: center; gap: 10px; padding: 10px 0;
+             font-size: 13px; color: var(--ink-dim); }
+.adv-score input {
+  width: 84px; font: inherit; font-size: 15px; text-align: right;
+  color: var(--gold-bright); background: #16202a;
+  border: 1px solid var(--gold-dim); padding: 4px 7px;
+}
+
+.adv-sub { font-size: 13px; color: var(--ink-dim); margin: 6px 0; }
+
+.adie { display: grid; grid-template-columns: 38px 1fr auto;
+        align-items: center; gap: 10px; padding: 5px 0;
+        border-bottom: 1px solid var(--rule); }
+.adie img { width: 32px; height: 32px;
+            filter: drop-shadow(0 2px 3px rgba(0, 0, 0, .6)); }
+.adie-name { font-size: 15px; color: var(--gold); min-width: 0;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.faces { display: flex; gap: 4px; }
+.faces button {
+  width: 30px; height: 30px; font-family: inherit; font-size: 14px;
+  color: var(--ink-dim); background: #16202a; border: 1px solid #ffffff22;
+  cursor: pointer;
+}
+.faces button:hover { border-color: var(--gold-dim); color: var(--ink); }
+.faces button.sel { background: var(--sel); color: var(--sel-ink);
+                    font-weight: 700; border-color: #a88943; }
+
+.advice { margin-top: 10px; padding: 12px 14px;
+          border: 1px solid var(--gold-dim); background: #00000033; }
+.advice--bad { border-color: #7a3b34; }
+.adv-keep { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0 8px; }
+.rolled { display: inline-block; min-width: 17px; padding: 0 3px; margin-left: 4px;
+          text-align: center; background: var(--sel); color: var(--sel-ink);
+          font-weight: 700; border-radius: 2px; }
+.adv-action { font-size: 18px; color: var(--gold-bright);
+              letter-spacing: .03em; margin: 8px 0 4px; }
+.advice--bad .adv-action { color: #e8b3aa; }
+.adv-ev { font-size: 13px; color: var(--value); margin: 4px 0 10px; }
+.adv-ev b { color: var(--gold-bright); }
+
+/* --- Progress & misc ------------------------------------------------------ */
+.progress-track { height: 12px; background: #222d36; border: 1px solid var(--gold-dim); }
+/* Completions arrive in bursts as workers finish together, so ease the width a
+   little longer than the poll interval to smooth the steps into a sweep. */
+.progress-fill { height: 100%; width: 0; transition: width .35s ease-out;
+                 background: linear-gradient(180deg, var(--gold-bright), var(--gold-dim)); }
+.notice { padding: 10px 12px; font-size: 13px;
+          background: #4a1614dd; border: 1px solid #9c4340; color: #f3cecd; }
+.muted { color: var(--ink-dim); font-size: 12.5px; }
+.center { text-align: center; }
+.footnote { position: relative; z-index: 1; padding: 10px 18px 14px;
+            font-size: 12px; color: var(--ink-dim); font-style: italic; text-align: center; }
+
+.scroll { scrollbar-width: thin; scrollbar-color: var(--gold-dim) #1d262e; }
+.scroll::-webkit-scrollbar { width: 10px; }
+.scroll::-webkit-scrollbar-track { background: #1d262ecc; }
+.scroll::-webkit-scrollbar-thumb { background: #6a5730; border: 1px solid #364450; }
+.scroll::-webkit-scrollbar-thumb:hover { background: var(--gold-dim); }
+
+/* Keyboard hint in the advisor; quiet, the way the game footnotes its keys. */
+.keyhint { font-size: 11px; color: #6d7d8d; text-transform: uppercase;
+           letter-spacing: .08em; margin-left: 8px; }
+
+/* Brass corner flourishes framing the whole screen, as the game frames its
+   menus. Fixed and non-interactive; purely scenery. */
+.corners { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+.corners img { position: fixed; width: 150px; height: auto; opacity: .8; }
+.corners img:nth-child(1) { top: 0; left: 0; }
+.corners img:nth-child(2) { top: 0; right: 0; }
+.corners img:nth-child(3) { bottom: 0; left: 0; }
+.corners img:nth-child(4) { bottom: 0; right: 0; }

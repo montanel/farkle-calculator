@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Farkle Dice Optimiser &mdash; KCD2</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <div class="corners" aria-hidden="true">
+      <img src="img/KCD2_frame_topleft.png" alt="">
+      <img src="img/KCD2_frame_topright.png" alt="">
+      <img src="img/KCD2_frame_botleft.png" alt="">
+      <img src="img/KCD2_frame_botright.png" alt="">
+    </div>
+    <div class="wrap">
+
+      <div class="frame">
+        <div class="bar bar--title"><h1>Farkle Dice Optimiser</h1></div>
+      </div>
+
+      <div class="cols">
+
+        <div class="frame frame--panel">
+          <div class="bar"><h2>Dice catalogue</h2></div>
+          <div class="body">
+            <input type="text" id="search" class="search" autocomplete="off"
+                   placeholder="Search dice by name...">
+          </div>
+          <div id="dice-list" class="scroll"></div>
+        </div>
+
+        <div class="frame frame--panel">
+          <div class="bar"><h2>Your chest</h2></div>
+          <div id="tally" class="tally"></div>
+          <div id="owned-list" class="scroll"></div>
+
+          <div class="presets">
+            <button id="preset-save" class="btn-sm">Save</button>
+            <select id="preset-pick" class="btn-sm"><option value="">Load a set...</option></select>
+            <button id="preset-load" class="btn-sm">Load</button>
+            <button id="preset-del" class="btn-sm">Delete</button>
+            <button id="clear" class="btn-sm btn-danger">Empty</button>
+          </div>
+
+          <div class="depth">
+            <label for="depth">Solve exactly</label>
+            <select id="depth" class="btn-sm">
+              <option value="5">top 5 &mdash; quickest</option>
+              <option value="10">top 10</option>
+              <option value="20" selected>top 20 &mdash; safest</option>
+              <option value="40">top 40 &mdash; thorough</option>
+            </select>
+          </div>
+
+          <div class="body">
+            <button id="go" class="btn">Find the Best Set</button>
+            <div id="progress" style="display:none; margin-top:11px">
+              <p id="progress-label" class="muted" style="margin:0 0 5px"></p>
+              <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+            </div>
+            <div id="error" class="notice" style="display:none; margin-top:11px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="results" class="frame" style="display:none; margin-top:18px">
+        <div class="bar bar--split">
+          <h2>Best Sets</h2>
+          <label class="target-pick">wager
+            <select id="target" class="btn-sm">
+              <option value="2000">2,000</option>
+              <option value="3000">3,000</option>
+              <option value="4000" selected>4,000</option>
+            </select>
+          </label>
+        </div>
+        <div id="result-list"></div>
+        <p id="results-note" class="footnote"></p>
+      </div>
+
+      <div id="advisor" class="frame" style="display:none; margin-top:18px">
+        <div class="bar"><h2>Play along</h2></div>
+        <div class="body">
+          <div id="adv-set" class="adv-chips"></div>
+          <div class="adv-score">
+            <label for="adv-t">Round tally (the middle number)</label>
+            <input type="number" id="adv-t" min="0" max="10000" step="50" value="0">
+            <button id="adv-reset" class="btn-sm">New turn</button>
+          </div>
+          <div id="adv-dice"></div>
+          <p class="center" style="margin:12px 0 4px">
+            <button id="adv-go" class="btn" disabled>What do I keep?</button>
+          </p>
+          <div id="adv-out"></div>
+        </div>
+      </div>
+
+      <div class="frame" style="margin-top:18px">
+        <div class="bar"><h3>About the numbers</h3></div>
+        <div class="body">
+          <table class="rows rows--wide">
+            <tr>
+              <th>Turns to win</th>
+              <td>How many turns, on average, the set needs to reach the
+                  <b>wager</b> you pick above the table &mdash; the number sets
+                  are ranked by, lowest first. It already prices in busting: a
+                  turn that Farkles banks nothing yet still costs you a turn, so
+                  a reckless set climbs here even when its points look good.</td>
+            </tr>
+            <tr>
+              <th>Points / turn</th>
+              <td>What one turn with that set is worth on average, playing
+                  perfectly. Computed exactly &mdash; no simulation. Shown as the
+                  secondary figure, since points alone ignore how often you bust.</td>
+            </tr>
+            <tr>
+              <th>Optimal strategy</th>
+              <td>Click any set to see when to throw and when to pass, or use
+                  <em>Play along</em> to enter each throw as you make it and be
+                  told exactly which dice to set aside.</td>
+            </tr>
+            <tr>
+              <th>Ordinary dice</th>
+              <td>The game fills any slot you do not fill yourself, so sets using
+                  fewer than six special dice are considered automatically.</td>
+            </tr>
+            <tr>
+              <th>Caveat</th>
+              <td>Turns to win assumes you play every turn for maximum points;
+                  in truth, once a single bank would cross the line you just take
+                  it, so the final turn runs a touch faster than shown.</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="tip"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,525 @@
+"""Tests for the Farkle rules and solver.
+
+    python tests.py          # fast checks (~15s)
+    python tests.py --slow   # also Monte-Carlo validates the DP (~2min)
+"""
+
+import math
+import pathlib
+import random
+import sys
+
+from farkle.rules import (FULL_HAND, best_score, best_take, members,
+                          get_all_possible_combinations, outcome_probabilities)
+from farkle import solver
+from farkle.dice import (DICE, DICE_PROBS, DICE_WEIGHTS, DICE_ICON, WILDCARD,
+                         DEFAULT_DIE, DICE_WIKI, WIKI_BASE, _WIKI_TITLE)
+
+WEB_IMG = pathlib.Path(__file__).parent / "farkle" / "web" / "img"
+
+# No real die is deterministic, so build one to exercise the degenerate paths.
+ALWAYS_THREE = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+
+FAILED = []
+
+
+def check(name, got, want):
+    ok = got == want
+    if not ok:
+        FAILED.append(f"{name}: got {got!r}, want {want!r}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {name:<44} {got}")
+
+
+def close(name, got, want, tol):
+    ok = abs(got - want) <= tol
+    if not ok:
+        FAILED.append(f"{name}: got {got}, want {want} +/- {tol}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {name:<44} {got:.2f} (want {want} +/-{tol})")
+
+
+def cv(*faces):
+    c = [0] * 6
+    for f in faces:
+        c[f - 1] += 1
+    return tuple(c)
+
+
+def test_scoring():
+    print("\nScoring rules (KCD2 wiki table)")
+    check("single 1", best_score(cv(1)), 100)
+    check("single 5", best_score(cv(5)), 50)
+    check("1 + 5", best_score(cv(1, 5)), 150)
+    check("three 1s", best_score(cv(1, 1, 1)), 1000)
+    check("three 2s", best_score(cv(2, 2, 2)), 200)
+    check("three 6s", best_score(cv(6, 6, 6)), 600)
+    check("four 4s (doubles)", best_score(cv(4, 4, 4, 4)), 800)
+    check("five 4s (doubles again)", best_score(cv(4, 4, 4, 4, 4)), 1600)
+    check("six 4s", best_score(cv(4, 4, 4, 4, 4, 4)), 3200)
+    check("six 1s", best_score(cv(1, 1, 1, 1, 1, 1)), 8000)
+    check("partial straight 1-5", best_score(cv(1, 2, 3, 4, 5)), 500)
+    check("partial straight 2-6", best_score(cv(2, 3, 4, 5, 6)), 750)
+    check("full straight", best_score(cv(1, 2, 3, 4, 5, 6)), 1500)
+
+    print("\n  decomposition must beat greedy")
+    check("straight + spare 1", best_score(cv(1, 1, 2, 3, 4, 5)), 600)
+    check("straight + spare 5", best_score(cv(1, 2, 3, 4, 5, 5)), 550)
+    check("2-6 straight beats 1-5+extra", best_score(cv(2, 3, 4, 5, 6)), 750)
+
+    print("\n  illegal set-asides return None")
+    check("lone 3", best_score(cv(3)), None)
+    check("pair of 3s", best_score(cv(3, 3)), None)
+    check("1 with a dangling 2", best_score(cv(1, 2)), None)
+
+    print("\n  best_take may leave dice behind")
+    check("take the 1, drop the 2", best_take(cv(1, 2)), 100)
+    check("nothing scores", best_take(cv(2, 2, 3, 3, 4, 6)), 0)
+    check("take triple, drop rest", best_take(cv(6, 6, 6, 2, 3, 4)), 600)
+
+
+def test_selection_enumeration():
+    print("\nSelection enumeration")
+    check("Farkle roll has no moves",
+          len(get_all_possible_combinations([2, 2, 3, 3, 4, 6])), 0)
+    check("1-6 straight roll", len(get_all_possible_combinations([1, 2, 3, 4, 5, 6])), 6)
+    check("all six 1s -> every subset legal",
+          len(get_all_possible_combinations([1] * 6)), 63)
+    opts = get_all_possible_combinations([5, 5, 5, 5, 2, 3])
+    check("four 5s is the best move there", max(p for _, p in opts), 1000)
+    for idx, pts in get_all_possible_combinations([1, 2, 3, 4, 5, 5]):
+        counts = [0] * 6
+        for i in idx:
+            counts[[1, 2, 3, 4, 5, 5][i] - 1] += 1
+        if best_score(tuple(counts)) != pts:
+            FAILED.append("enumerated points disagree with best_score")
+    print("  ok   enumerated points agree with best_score")
+
+
+def test_dice_data():
+    print("\nDice data")
+    bad = [n for n, p in DICE_PROBS.items() if abs(sum(p) - 1) > 1e-12]
+    check("every distribution sums to 1", bad, [])
+    check("optimisable dice", len(DICE_WEIGHTS), 41)
+    check("wildcard dice excluded from play", sorted(WILDCARD),
+          ["Balatro's die", "Devil's head die"])
+    check("wildcards absent from the solver pool",
+          [n for n in WILDCARD if n in DICE_PROBS], [])
+    check("Pie die can never roll 5 or 6",
+          [DICE_PROBS["Pie die"][4], DICE_PROBS["Pie die"][5]], [0.0, 0.0])
+    # The original JS data claimed this die always rolls a 3; the wiki says
+    # otherwise, and getting it wrong badly overrates the die.
+    check("Saint Antiochus' die matches the wiki (40% threes)",
+          DICE_WEIGHTS["Saint Antiochus' die"], ([3, 1, 6, 1, 1, 3], 15))
+    check("every die has an icon on disk",
+          [n for n, i in DICE_ICON.items()
+           if not i or not (WEB_IMG / i).is_file()], [])
+    # Names are scraped from wikitext; a greedy regex once swallowed a whole
+    # inline infobox into one of them, which silently broke the wildcard lookup.
+    check("names are clean (no leftover wiki markup)",
+          [n for n in DICE if "|" in n or "=" in n or "}" in n or len(n) > 40], [])
+    check("every wildcard name exists in the dice table",
+          [n for n in WILDCARD if n not in DICE], [])
+
+    # Wiki links are built from the die name, so a name change silently produces
+    # a dead link. These check the construction, not the network: the URLs were
+    # verified once against action=query&prop=info&inprop=url for all 43 pages.
+    check("every die has a wiki link", sorted(set(DICE) - set(DICE_WIKI)), [])
+    check("wiki links are absolute and on the wiki",
+          [n for n, u in DICE_WIKI.items() if not u.startswith(WIKI_BASE)], [])
+    # A raw apostrophe or space in a href is the exact bug this encoding avoids.
+    check("wiki links are properly encoded",
+          [n for n, u in DICE_WIKI.items()
+           if " " in u or "'" in u or '"' in u], [])
+    # Disambiguated pages exist for real dice only; a stale entry would point a
+    # renamed die at a page that no longer matches it.
+    check("every disambiguated title names a real die",
+          [n for n in _WIKI_TITLE if n not in DICE], [])
+    check("apostrophes survive as %27",
+          DICE_WIKI["King's die"], WIKI_BASE + "King%27s_die")
+    check("disambiguation suffix is kept",
+          DICE_WIKI["Ci die"], WIKI_BASE + "Ci_die/KCD2")
+
+
+def test_probability_tables():
+    print("\nProbability bookkeeping")
+    for name in ["Ordinary die", "King's die", "Pie die"]:
+        dp = [DICE_PROBS[name]] * 6
+        for hand in (0b1, 0b101, FULL_HAND):
+            total = sum(outcome_probabilities(hand, dp))
+            if abs(total - 1) > 1e-9:
+                FAILED.append(f"outcome probs for hand {hand} sum to {total}")
+    print("  ok   outcome distributions sum to 1")
+
+    # Outcome ids must line up between the probability vector and the move table.
+    mv = solver.moves()
+    dp = [ALWAYS_THREE] * 6  # deterministic: always all 3s
+    probs = outcome_probabilities(FULL_HAND, dp)
+    live = [i for i, p in enumerate(probs) if p > 0]
+    check("deterministic dice -> exactly one outcome", len(live), 1)
+    check("that outcome is six 3s worth 2400",
+          max(pts for _, pts in mv[FULL_HAND][live[0]]), 2400)
+
+
+def test_solver_values():
+    print("\nSolver")
+    fair = [DICE_PROBS["Ordinary die"]] * 6
+    close("fair dice, first roll", solver.first_roll_ev(fair), 399.1, 0.2)
+    close("fair dice, optimal turn", solver.turn_ev(fair)["turn_ev"], 564.4, 0.2)
+
+    # Six dice that always roll 3s: every roll is six 3s = 2400, never a Farkle,
+    # so the solver should roll forever and stop only at the bank cap.
+    ant = [ALWAYS_THREE] * 6
+    check("deterministic dice, first roll", solver.first_roll_ev(ant), 2400.0)
+    check("deterministic dice, turn (rolls to the cap)",
+          solver.turn_ev(ant)["turn_ev"], 12000.0)
+
+    fair_names = ["Ordinary die"] * 6
+    th = solver.turn_ev(fair, want_policy=True, names=fair_names)["bank_at"]
+    size = th["by_size"]
+    # With identical dice every hand of a given size must agree exactly...
+    ok = all(v["safe"] == v["high"] for v in size.values() if v["safe"] is not None)
+    if not ok:
+        FAILED.append(f"identical dice gave a spread within a hand size: {size}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'identical dice -> no spread within a hand size':<44} ok")
+    # ...and identical dice collapse to one named hand per size.
+    check("identical dice -> one distinct hand per size",
+          sorted({h["n"] for h in th["hands"]}), [1, 2, 3, 4, 5, 6])
+    check("duplicate hands collapsed", len(th["hands"]), 6)
+
+    # ...and from two dice up, holding more justifies pushing your luck longer.
+    lo = {n: v["safe"] for n, v in size.items()}
+    ok = lo[5] > lo[4] > lo[3] > lo[2] and lo[6] is None
+    if not ok:
+        FAILED.append(f"bank thresholds should rise from 2 dice up: {size}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'2+ dice: more in hand -> roll longer':<44} {lo}")
+
+    # The safe figure must never exceed any real hand of that size, or acting on
+    # it would roll past the right moment for the hand actually held.
+    bad = [h for h in th["hands"] if h["bank"] is not None
+           and h["bank"] < (lo[h["n"]] or 0)]
+    check("safe threshold never overshoots a real hand", bad, [])
+
+    # The one-die threshold deliberately breaks that pattern. Rolling your last
+    # die is the only way to trigger hot dice, so success refills the hand and
+    # the gamble is worth more than the safer-looking two-die roll. Verified by
+    # rebuilding the table with hot dice removed, which restores monotonicity.
+    ok = lo[1] > lo[2]
+    if not ok:
+        FAILED.append(f"expected the hot-dice anomaly at one die: {lo}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'hot dice make 1 die worth more than 2':<44} "
+          f"{lo[1]} > {lo[2]}")
+
+    ev1 = solver.first_roll_ev(fair)
+    ev2 = solver.turn_ev(fair)["turn_ev"]
+    ok = ev2 > ev1
+    if not ok:
+        FAILED.append("playing the turn out should beat stopping after one roll")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'optimal play beats one-and-done':<44} "
+          f"{ev1:.0f} -> {ev2:.0f}")
+
+    test_turn_shape(fair)
+
+
+def test_turn_shape(fair):
+    """The forward pass: how a turn actually ends, not just where it would stop."""
+    res = solver.turn_ev(fair, want_policy=True, names=["Ordinary die"] * 6)
+    shape, by_size = res["shape"], res["shape"]["by_size"]
+
+    # _turn_shape asserts this internally; check it here too so a regression
+    # reports as a named failure rather than an AssertionError mid-run.
+    total = shape["bust"] + sum(s["bank"] for s in by_size.values())
+    ok = abs(total - 1.0) < 1e-9
+    if not ok:
+        FAILED.append(f"turn outcomes should sum to 1, got {total}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'every turn ends somewhere':<44} {total:.12f}")
+
+    # Six fair dice bust ~19% of turns under optimal play -- well below the 2.3%
+    # chance of an immediate six-die Farkle plus the risk taken on later rolls.
+    ok = 0.15 < shape["bust"] < 0.25
+    if not ok:
+        FAILED.append(f"fair-dice bust rate out of range: {shape['bust']}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'fair dice bust ~19% of turns':<44} "
+          f"{shape['bust'] * 100:.1f}%")
+
+    # Fair dice never *choose* to stop on a full hand, so any six-die banking is
+    # forced: hot dice refilled the hand and carried the score past the cap.
+    # That is a real path, just a vanishingly rare one -- not the zero it looks
+    # like at a glance.
+    ok = res["bank_at"]["by_size"][6]["safe"] is None and 0 < by_size[6]["bank"] < 1e-5
+    if not ok:
+        FAILED.append(f"six-die banking should be forced-only and rare: {by_size[6]}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'six-die banking only via the cap':<44} "
+          f"{by_size[6]['bank']:.2e}")
+
+    # The point behind the UI's "how often" column: a high threshold is a rule
+    # you will rarely meet. Five dice left is reachable only via hot dice, so
+    # almost no turn ends there, while most end at one or two dice.
+    ends = {n: by_size[n]["bank"] + by_size[n]["bust"] for n in range(1, 7)}
+    ok = ends[5] < 0.06 and ends[1] + ends[2] > 0.5
+    if not ok:
+        FAILED.append(f"turn endings concentrate at small hands, got {ends}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'turns end with few dice in hand':<44} "
+          f"{ {n: round(p * 100, 1) for n, p in ends.items()} }")
+
+    # A single fair die scores on a 1 or a 5, so rolling one busts exactly 4/6 of
+    # the time regardless of score. This is the number people expect the table to
+    # show, and it is nowhere near the share of turns that *end* on one die --
+    # those are almost all banks. Keeping both pinned stops the two being
+    # conflated again.
+    risk = by_size[1]["bust_if_roll"]
+    ok = abs(risk - 2 / 3) < 1e-9
+    if not ok:
+        FAILED.append(f"rolling one fair die should bust 2/3 of the time, got {risk}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'rolling one fair die busts 2/3':<44} {risk:.4f}")
+
+    ok = by_size[1]["bust"] < 0.01 < 0.2 < by_size[1]["bank"]
+    if not ok:
+        FAILED.append(f"one-die endings should be overwhelmingly banks: {by_size[1]}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'yet turns ending on one die are banks':<44} "
+          f"{by_size[1]['bank'] * 100:.1f}% bank vs {by_size[1]['bust'] * 100:.2f}% bust")
+
+    # Fewer dice is strictly more dangerous to roll: no hand can score with dice
+    # it does not have.
+    risks = [by_size[n]["bust_if_roll"] for n in range(6, 0, -1)]
+    ok = all(a < b for a, b in zip(risks, risks[1:]))
+    if not ok:
+        FAILED.append(f"bust risk should rise as dice are removed: {risks}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'bust risk climbs as dice run out':<44} "
+          f"{[round(x * 100) for x in risks]}")
+
+    # A rarely-reached hand can still carry a high threshold; that combination
+    # is exactly what confuses people reading the table, so pin it down.
+    five = res["bank_at"]["by_size"][5]["safe"]
+    ok = five is not None and five > 2000 and ends[5] < 0.06
+    if not ok:
+        FAILED.append(f"expected a high but rarely-met five-die threshold: {five}, {ends[5]}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'high threshold != often reached':<44} "
+          f"{five} but only {ends[5] * 100:.1f}% of turns")
+
+
+def test_turns_to_win():
+    print("\nTurns to win (renewal over the banked distribution)")
+    fair = [DICE_PROBS["Ordinary die"]] * 6
+    res = solver.turn_ev(fair, want_policy=True, names=["Ordinary die"] * 6)
+    ttw = res["turns_to_win"]
+
+    check("all wager targets reported", sorted(ttw), list(solver.WIN_TARGETS))
+    # A harder target can only cost more turns, never fewer.
+    vals = [ttw[t] for t in sorted(ttw)]
+    ok = all(a < b for a, b in zip(vals, vals[1:]))
+    if not ok:
+        FAILED.append(f"turns to win should rise with the target: {ttw}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'more points needed -> more turns':<44} "
+          f"{ {t: round(v, 2) for t, v in ttw.items()} }")
+
+    # Sanity floor: fair dice bank ~564 a turn and bust ~19%, so reaching 4000
+    # takes well more than 4000/564 = 7.1 turns once wasted busts are counted.
+    ok = 7.1 < ttw[4000] < 9.0
+    if not ok:
+        FAILED.append(f"fair-dice turns-to-4000 out of range: {ttw[4000]}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'fair dice reach 4000 in ~8 turns':<44} {ttw[4000]:.2f}")
+
+    # A busted turn banks nothing, so turns-to-win must exceed the frictionless
+    # target/turn_ev estimate that pretends every turn lands its average.
+    naive = 4000 / res["turn_ev"]
+    ok = ttw[4000] > naive
+    if not ok:
+        FAILED.append(f"turns-to-win {ttw[4000]} should beat naive {naive}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'bust friction shows vs target/turn_ev':<44} "
+          f"{ttw[4000]:.2f} > {naive:.2f}")
+
+    # The deterministic 3s die never busts and banks 2400 a roll to the 12000
+    # cap, so a 4000 game is one turn flat -- the renewal's no-friction floor.
+    ant = [ALWAYS_THREE] * 6
+    at = solver.turn_ev(ant, want_policy=True, names=["Ordinary die"] * 6)["turns_to_win"]
+    check("never-bust dice win 4000 in one turn", round(at[4000], 6), 1.0)
+
+
+def test_advisor():
+    print("\nPlay-along advisor")
+    fair = [DICE_PROBS["Ordinary die"]] * 6
+
+    # A full straight scores every die: keep all six, hot dice refill the
+    # table, and six fair dice always throw on.
+    r = solver.advise(fair, 63, {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6}, 0)
+    check("straight: set aside all six", r["keep"], [0, 1, 2, 3, 4, 5])
+    check("straight is worth 1500", r["points"], 1500)
+    check("hot dice refill the table", (r["hot"], r["next_mask"]), (True, FULL_HAND))
+    check("with six back, keep throwing", r["action"], "reroll")
+
+    # Nothing scores: no 1s or 5s, no triple, no straight.
+    r = solver.advise(fair, 63, {0: 2, 1: 2, 2: 3, 3: 4, 4: 6, 5: 6}, 300)
+    check("farkle detected, pile lost", (r["bust"], r["lost"]), (True, 300))
+
+    # Two dice left, only the 5 scores; 400 + 50 = 450 is past the one-die
+    # threshold of 300, so pass.
+    r = solver.advise(fair, 0b11, {0: 5, 1: 2}, 400)
+    check("forced single keep", (r["keep"], r["points"]), ([0], 50))
+    check("past the threshold: pass", r["action"], "bank")
+
+    # Same roll at t=0: 50 in hand is under the threshold, so throw the one die.
+    r = solver.advise(fair, 0b11, {0: 5, 1: 2}, 0)
+    check("under the threshold: throw", (r["action"], r["reroll_count"]), ("reroll", 1))
+
+    # At the cap banking is forced no matter what.
+    r = solver.advise(fair, 0b1, {0: 5}, 10_000)
+    check("cap forces a pass", (r["action"], r["roll_value"]), ("bank", None))
+
+    # The advice must reproduce the DP's own argmax at every state, and its
+    # bookkeeping must partition the thrown dice. Random-audit a wide slice.
+    import random
+    rng = random.Random(7)
+    V = solver.value_table(fair)
+    mv = solver.moves()
+    bad = []
+    for _ in range(300):
+        mask = rng.randrange(1, 64)
+        mem = [i for i in range(6) if mask >> i & 1]
+        faces = {i: rng.randrange(1, 7) for i in mem}
+        t = 50 * rng.randrange(0, 120)
+        r = solver.advise(fair, mask, faces, t)
+        oid = sum((faces[i] - 1) * 6 ** j for j, i in enumerate(mem))
+        opts = mv[mask][oid]
+        if not opts:
+            if not r.get("bust"):
+                bad.append((mask, faces, t, "missed farkle"))
+            continue
+        best = max(V[nm * solver.ROW + t // 50 + p // 50] for nm, p in opts)
+        got = V[r["next_mask"] * solver.ROW + r["turn_score"] // 50]
+        if abs(got - best) > 1e-9:
+            bad.append((mask, faces, t, "suboptimal"))
+        kept = sum(1 << i for i in r["keep"])
+        legal = (kept | r["next_mask"] == mask if not r["hot"]
+                 else kept == mask and r["next_mask"] == FULL_HAND)
+        if not legal or kept & r["next_mask"] and not r["hot"]:
+            bad.append((mask, faces, t, "kept/reroll not a partition"))
+    check("advice == DP argmax (300 random states)", bad, [])
+
+
+def test_ranking_matches_bruteforce():
+    print("\nStage-1 ranking vs. direct computation")
+    names = ["Ordinary die", "King's die", "Weighted die", "Pie die",
+             "Grimy die", "Odd die", "Lucky die"]
+    probs = [DICE_PROBS[n] for n in names]
+    pool = [(p, 1) for p in probs]
+    ranked = solver.rank_combinations(pool)
+    check("every 6-subset ranked", len(ranked), 7)
+    worst = 0.0
+    for ev, counts in ranked:
+        rows = []
+        for i, c in enumerate(counts):
+            rows.extend([probs[i]] * c)
+        worst = max(worst, abs(ev - solver.first_roll_ev(rows)))
+    ok = worst < 1e-9
+    if not ok:
+        FAILED.append(f"fast ranking disagrees with direct EV by {worst}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'shared-prefix DP == direct enumeration':<44} "
+          f"max diff {worst:.2e}")
+
+
+def test_pool_and_autofill():
+    print("\nSelection pool: quantities and ordinary-die fill")
+    check("7 distinct dice, one each", solver.count_multisets([1] * 7, 6), 7)
+    check("3 distinct, six each", solver.count_multisets([6, 6, 6], 6), 28)
+    check("nothing to pick from", solver.count_multisets([], 6), 0)
+
+    # Owning two of a die must allow using both, and no more.
+    res = solver.optimize({"Weighted die": 2}, DICE_PROBS, refine=4,
+                          fill_die=DEFAULT_DIE)
+    counts = {n: c for r in res["results"] for n, c in r["counts"]}
+    over = [r["counts"] for r in res["results"]
+            if dict(r["counts"]).get("Weighted die", 0) > 2]
+    check("quantity cap respected", over, [])
+    check("selections considered", res["combinations_ranked"], 3)
+
+    best = res["results"][0]
+    check("best uses both special dice plus fill",
+          sorted(best["counts"]), [["Ordinary die", 4], ["Weighted die", 2]])
+    for r in res["results"]:
+        if sum(c for _, c in r["counts"]) != 6:
+            FAILED.append(f"selection is not six dice: {r['counts']}")
+    print("  ok   every selection is exactly six dice")
+
+    # An all-ordinary hand must reproduce the plain fair-dice value.
+    allord = next(r for r in res["results"]
+                  if dict(r["counts"]).get("Ordinary die") == 6)
+    close("six ordinary dice == fair-dice baseline", allord["turn_ev"], 564.4, 0.2)
+
+    # Without a fill die, fewer than six owned dice means nothing to solve.
+    empty = solver.optimize({"Weighted die": 2}, DICE_PROBS, refine=4, fill_die=None)
+    check("no fill die and too few owned -> no results", empty["results"], [])
+
+
+def test_montecarlo(trials=200_000):
+    """Play the solver's own policy at random and see if it earns what it claims."""
+    print(f"\nMonte-Carlo validation ({trials:,} simulated turns per set)")
+    ROW, STEP, NT = solver.ROW, solver.STEP, solver.NT
+    mv = solver.moves()
+    rng = random.Random(99)
+
+    for name in ["Ordinary die", "Heavenly Kingdom die", "Die of misfortune"]:
+        dp = [DICE_PROBS[name]] * 6
+        V = solver.value_table(dp)
+        exact = V[FULL_HAND * ROW]
+
+        cums = []
+        for pr in dp:
+            c, s = [], 0.0
+            for x in pr:
+                s += x
+                c.append(s)
+            cums.append(c)
+
+        total = sq = 0
+        for _ in range(trials):
+            hand, t = FULL_HAND, 0
+            while True:
+                ti = t // STEP
+                if ti >= NT or V[hand * ROW + ti] <= t:
+                    break
+                oid = 0
+                for j, die in enumerate(members(hand)):
+                    r, c, f = rng.random(), cums[die], 0
+                    while f < 5 and r >= c[f]:
+                        f += 1
+                    oid += f * 6 ** j
+                opts = mv[hand][oid]
+                if not opts:
+                    t = 0
+                    break
+                best = max(((V[n * ROW + (t + p) // STEP], n, p) for n, p in opts),
+                           key=lambda z: z[0])
+                hand, t = best[1], t + best[2]
+            total += t
+            sq += t * t
+
+        mean = total / trials
+        sd = math.sqrt(max(sq / trials - mean * mean, 0))
+        se = sd / math.sqrt(trials)
+        z = abs(mean - exact) / se if se else 0.0
+        ok = z < 4
+        if not ok:
+            FAILED.append(f"{name}: simulated {mean:.1f} vs exact {exact:.1f} (z={z:.1f})")
+        print(f"  {'ok  ' if ok else 'FAIL'} {name:<28} exact {exact:8.1f}  "
+              f"simulated {mean:8.1f} +/-{se:.1f}  (z={z:.2f})")
+
+
+if __name__ == "__main__":
+    test_scoring()
+    test_selection_enumeration()
+    test_dice_data()
+    test_probability_tables()
+    test_solver_values()
+    test_turns_to_win()
+    test_advisor()
+    test_ranking_matches_bruteforce()
+    test_pool_and_autofill()
+    if "--slow" in sys.argv:
+        test_montecarlo()
+
+    print()
+    if FAILED:
+        print(f"{len(FAILED)} FAILURE(S):")
+        for f in FAILED:
+            print(f"  - {f}")
+        sys.exit(1)
+    print("All tests passed.")
