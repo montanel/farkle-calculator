@@ -457,6 +457,137 @@ def turns_to_win(V, work, targets=WIN_TARGETS):
     return {t: g[t // STEP] for t in targets}
 
 
+# --- Need-aware turns-to-clear solver -----------------------------------------
+# turns_to_win renews over the EV-max policy's banked distribution, but that is
+# the wrong policy: it plays every turn for maximum points even when the game
+# only needs a few hundred more to win. This solver instead answers, for each
+# remaining need r, the expected number of turns to clear it under the policy
+# that MINIMISES that number -- every decision conditioned on how much is still
+# wanted, and never rolling past the need.
+#
+# g[r] = expected turns to clear a remaining need of r (g[r] = 0 for r <= 0).
+# Within a turn at need r, U_r(hand, t) = expected total turns from here (this
+# turn counted as 1) until the need clears, with t the tally set aside so far and
+# `hand` the dice about to be rolled:
+#
+#   t >= r:  U = 1                        bank now and win; no reason to roll on
+#   else:    U = min(bank, roll)
+#     bank = 1 + g[r - t]                 only when t > 0 (the first roll can't be skipped)
+#     roll = P(farkle) * (1 + g[r])       a bust ends the turn, needing g[r] more
+#          + sum over scoring outcomes P(o) * min over set-asides U_r(next, t+pts)
+#
+# Sweeping r upward makes every g[r-t] (t > 0) already known; the sole self-
+# reference is the bust term's g[r]. Parameterise it: guess x for g[r], value a
+# bust at 1 + x, solve the turn DP, read g'[r] = U_r(FULL_HAND, 0). For a fixed
+# induced policy the map x -> g'[r] is affine, g'[r] = a + b*x, with slope b =
+# P(bust during the turn) < 1 -- so one sweep that also accumulates b jumps
+# straight to the fixed point g[r] = (g'[r] - b*x) / (1 - b). Iterate until the
+# policy stops shifting (a couple of sweeps, warm-started by extrapolating the
+# curve); b < 1 guarantees convergence, asserted within a bounded count.
+
+MAX_TARGET = 4000
+NEED_TARGETS = (1500, 2000, 2500, 3000, 4000)
+NEED_ITER_CAP = 200
+
+
+def _need_sweep(single, multi, farkle, g, ri, bustval, U, B):
+    """One backward sweep of the need-r turn DP at a fixed bust value.
+
+    Writes U[hand*ROW+ti] = U_r(hand, t) and B[hand*ROW+ti] = dU/d(bust value) =
+    the probability of busting before the need resolves, for ti in [0, ri). Cells
+    at ti >= ri must already hold the boundary (U = 1, B = 0: banked and won); the
+    sweep never writes them and relies on reading them as such. Mirrors
+    `value_table`'s flat indexing and move groups, but minimises and values the
+    bust branch at `bustval`. Returns (U, B) at (FULL_HAND, 0).
+    """
+    for ti in range(ri - 1, -1, -1):
+        gbank = 1.0 + g[ri - ti] if ti > 0 else None   # bank value, constant in bust
+        for hand in range(1, 64):
+            fk = farkle[hand]
+            ru = fk * bustval          # farkle: ends the turn worth 1 + g[r]
+            rb = fk                    # ...and carries all of the bust sensitivity
+            for p, off in single[hand]:
+                idx = off + ti
+                ru += p * U[idx]
+                rb += p * B[idx]
+            for p, offs in multi[hand]:
+                us = [U[o + ti] for o in offs]
+                mu = min(us)           # need-aware: fewest expected turns, not most points
+                ru += p * mu
+                rb += p * B[offs[us.index(mu)] + ti]
+            k = hand * ROW + ti
+            if gbank is not None and gbank <= ru:   # banking is (weakly) better: stop
+                U[k] = gbank
+                B[k] = 0.0
+            else:
+                U[k] = ru
+                B[k] = rb
+    fb = FULL_HAND * ROW
+    return U[fb], B[fb]
+
+
+def solve_need(work, g, ri, warm, U=None, B=None, tol=1e-9):
+    """Fixed-point solve for g[ri] given g[0..ri-1]; returns (g_ri, iters, bust, U).
+
+    `warm` is a starting guess for g[ri]. `U`/`B` may be reused arrays whose
+    ti >= ri cells hold the boundary (1.0 / 0.0); pass none and they are built.
+    `bust` is the converged slope B_full = P(a turn started at need r ends in a
+    bust) -- the mass at 0 of that turn's banked distribution. The returned U is
+    the converged U_r table -- the advisor reads it to pick moves -- so a single r
+    can be re-solved on demand rather than stored for all r.
+    """
+    single, multi, farkle = work
+    if U is None:
+        U = [1.0] * (64 * ROW)
+        B = [0.0] * (64 * ROW)
+    guess = warm
+    for it in range(1, NEED_ITER_CAP + 1):
+        uf, bf = _need_sweep(single, multi, farkle, g, ri, 1.0 + guess, U, B)
+        gnew = (uf - bf * guess) / (1.0 - bf)      # exact fixed point for this policy
+        if abs(gnew - guess) < tol:
+            return gnew, it, bf, U
+        guess = gnew
+    raise AssertionError(
+        f"need fixed point did not converge for r={ri * STEP} within "
+        f"{NEED_ITER_CAP} iterations (last step {abs(gnew - guess):.2e})")
+
+
+def need_curve(dice_probs, max_target=MAX_TARGET, work=None):
+    """Expected turns to clear every remaining need r = 0..max_target.
+
+    Returns {"g": [...], "iters": [...], "bust": [...]} indexed by r // STEP:
+    g[.] the need-aware expected turns (g[0] = 0), iters[.] the fixed-point sweeps
+    that r cost (small and bounded), and bust[.] = P(a turn started at need r ends
+    in a bust) under the need-aware policy (bust[0] = 0). A single r's policy is
+    reconstructed on demand with `solve_need`, cheap given `work` and g -- far
+    lighter than keeping 80 U tables per set. Keeps `value_table`/`turn_ev`
+    untouched for side-by-side comparison.
+    """
+    if work is None:
+        work = _work_lists(dice_probs)
+    n = max_target // STEP
+    g = [0.0] * (n + 1)
+    iters = [0] * (n + 1)
+    bust = [0.0] * (n + 1)
+    # One pair of arrays reused across every r: r is swept upward, so a cell above
+    # the current need was only ever the untouched boundary and is safe to read.
+    U = [1.0] * (64 * ROW)
+    B = [0.0] * (64 * ROW)
+    for ri in range(1, n + 1):
+        # The curve bends gently, so a linear extrapolation lands in the right
+        # policy region and keeps the sweep count near its two-sweep floor.
+        if ri >= 3:
+            warm = max(g[ri - 1], 2.0 * g[ri - 1] - g[ri - 2])
+        elif ri == 2:
+            warm = g[1]
+        else:
+            warm = 1.0
+        g[ri], iters[ri], bust[ri], _ = solve_need(work, g, ri, warm, U, B)
+        assert g[ri] >= g[ri - 1] - 1e-9, \
+            f"g not non-decreasing at r={ri * STEP}: {g[ri - 1]} -> {g[ri]}"
+    return {"g": g, "iters": iters, "bust": bust}
+
+
 def _init_worker(grouped):
     """Seed a fresh worker with the already-built move table.
 

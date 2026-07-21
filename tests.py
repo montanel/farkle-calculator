@@ -334,6 +334,130 @@ def test_turns_to_win():
     check("never-bust dice win 4000 in one turn", round(at[4000], 6), 1.0)
 
 
+def test_need_curve():
+    """The need-aware solver: expected turns to clear a remaining need r.
+
+    Checks the three Task-2 invariants (non-decreasing, the g[STEP] identity, and
+    g <= the legacy EV-max renewal at every r), that the bust fixed point
+    converges well inside its cap for a spread of dice, and a fast regression pin.
+    The exact g[2000] pin lives in the --slow run since solving that far costs a
+    few seconds.
+    """
+    print("\nNeed-aware turns-to-clear (need_curve)")
+    STEP = solver.STEP
+    fair = [DICE_PROBS["Ordinary die"]] * 6
+    fwork = solver._work_lists(fair)
+    farkle6 = fwork[2][FULL_HAND]
+
+    # Invariant: g[STEP] = 1 / P(a turn banks at least 50). For r = 50 the optimal
+    # policy is "bank the first thing that scores", so the turn wins exactly when
+    # the six-die opening roll is not a farkle -- checkable nearly by hand.
+    g50 = solver.need_curve(fair, max_target=STEP, work=fwork)["g"][1]
+    close("g[STEP] = 1/(1-farkle6)", g50, 1.0 / (1.0 - farkle6), 1e-9)
+
+    # Convergence and the other two invariants across a spread: ordinary, extreme-
+    # 1s Weighted (strong), a straight-oriented mix, a die with impossible faces
+    # (Pie has no 5s or 6s, exercising the zero-probability pruning under the min
+    # objective), and a never-bust deterministic die (bust prob 0 -- the 1/(1-b)
+    # edge). max_target is small so the whole spread stays quick.
+    always_three = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    spread = {
+        "all-ordinary": fair,
+        "six Weighted": [DICE_PROBS["Weighted die"]] * 6,
+        "straight-mix": [DICE_PROBS[n] for n in
+                         ["King's die", "Odd die", "Lucky die",
+                          "Grimy die", "Ordinary die", "Ordinary die"]],
+        "impossible-face Pie": [DICE_PROBS["Pie die"]] * 6,
+        "deterministic 3s": [always_three] * 6,
+    }
+    # Small target keeps the spread quick on a slow interpreter; the invariants
+    # hold at every r regardless of how far the curve runs. The g <= legacy check
+    # needs a value_table per set, so only a representative few pay for it (weak
+    # ordinary, strong Weighted, pruned Pie); convergence is checked on all.
+    tgt = 300
+    legacy_check = {"all-ordinary", "six Weighted", "impossible-face Pie"}
+    gmap, bustmap, bad_dec, bad_legacy, worst_iter = {}, {}, [], [], 0
+    for name, dp in spread.items():
+        work = solver._work_lists(dp)
+        # need_curve asserts non-decreasing internally and raises if the fixed
+        # point overruns its cap, so reaching here already proves convergence.
+        res = solver.need_curve(dp, max_target=tgt, work=work)
+        g, iters = res["g"], res["iters"]
+        gmap[name], bustmap[name] = g, res["bust"]
+        worst_iter = max(worst_iter, max(iters))
+        if not all(g[i] <= g[i + 1] + 1e-9 for i in range(len(g) - 1)):
+            bad_dec.append(name)
+        # The need-aware policy is optimal for exactly this objective, so it can
+        # never take more turns than the EV-max renewal -- at every r, not just at
+        # the endpoint.
+        if name in legacy_check:
+            V = solver.value_table(dp, work)
+            legacy = solver.turns_to_win(
+                V, work, targets=tuple(range(STEP, tgt + 1, STEP)))
+            if any(g[r // STEP] > legacy[r] + 1e-9
+                   for r in range(STEP, tgt + 1, STEP)):
+                bad_legacy.append(name)
+
+    check("g non-decreasing for every set", bad_dec, [])
+    check("need-aware g <= legacy turns_to_win", bad_legacy, [])
+    ok = 0 < worst_iter < solver.NEED_ITER_CAP
+    if not ok:
+        FAILED.append(f"fixed point iterations out of range: {worst_iter}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'fixed point converges inside the cap':<44} "
+          f"max {worst_iter} of {solver.NEED_ITER_CAP}")
+
+    # Endgame sanity at r = 300 (index 6). The need-aware policy banks the moment
+    # the tally covers the need, so a turn started this close should rarely bust --
+    # if any set still lost ~half its turns here, the "bank forced at t >= r" rule
+    # or a min/max slip would be the culprit. Every set stays well under half.
+    worst_bust300 = max(bustmap[n][6] for n in spread)
+    ok = worst_bust300 < 0.30
+    if not ok:
+        FAILED.append(f"r=300 bust fraction too high somewhere: {worst_bust300}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'r=300 turns rarely bust (not ~50%)':<44} "
+          f"worst {worst_bust300 * 100:.1f}%")
+
+    # A strong set all but clears 300 in a single turn: g[300] barely above 1 and
+    # a bust fraction near zero.
+    wg300, wbust300 = gmap["six Weighted"][6], bustmap["six Weighted"][6]
+    ok = wg300 < 1.02 and wbust300 < 0.01
+    if not ok:
+        FAILED.append(f"strong set endgame off: g[300]={wg300}, bust={wbust300}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'strong set clears r=300 in ~1 turn':<44} "
+          f"g[300]={wg300:.4f}, bust {wbust300 * 100:.2f}%")
+
+    # The banking boundary itself: at any t >= r the solved table must read U = 1
+    # (bank now and win), for every hand -- the rule that makes the endgame work.
+    _, _, _, U = solver.solve_need(fwork, gmap["all-ordinary"], 6,
+                                   gmap["all-ordinary"][6])
+    ROW = solver.ROW
+    boundary_ok = all(U[h * ROW + ti] == 1.0
+                      for h in range(1, 64) for ti in range(6, 10))
+    check("t >= r banks and wins (U == 1)", boundary_ok, True)
+
+    # Strong dice clear a need in fewer turns: six Weighted (extreme 1s) all but
+    # guarantee 50 on the opening roll, beating ordinary dice.
+    wg, og = gmap["six Weighted"][1], gmap["all-ordinary"][1]
+    ok = wg < og
+    if not ok:
+        FAILED.append(f"Weighted should clear 50 faster than ordinary: {wg} vs {og}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'stronger dice clear a need faster':<44} "
+          f"Weighted {wg:.4f} < ordinary {og:.4f}")
+
+    # Regression pin (exact solver, reviewed once): six ordinary dice average this
+    # many turns to bank 300. g[2000] is pinned in the --slow run.
+    close("g[300] pin (six ordinary dice)", gmap["all-ordinary"][6],
+          1.162884550685739, 1e-6)
+
+
+def test_need_curve_pin():
+    """Slow exact pin: the g[2000] value the spec calls for (~15s to solve)."""
+    print("\nNeed-aware regression pin (exact g[2000])")
+    fair = [DICE_PROBS["Ordinary die"]] * 6
+    g2000 = solver.need_curve(fair, max_target=2000)["g"][40]
+    close("g[2000] pin (six ordinary dice)", g2000, 4.2657554150, 1e-6)
+
+
 def test_turn_distribution():
     """The shape behind turn_ev: bust rate, quartiles, conditional mean.
 
@@ -567,10 +691,12 @@ if __name__ == "__main__":
     test_solver_values()
     test_turns_to_win()
     test_turn_distribution()
+    test_need_curve()
     test_advisor()
     test_ranking_matches_bruteforce()
     test_pool_and_autofill()
     if "--slow" in sys.argv:
+        test_need_curve_pin()
         test_montecarlo()
 
     print()
