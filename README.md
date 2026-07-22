@@ -328,6 +328,35 @@ and strong sets improve more. `g` at every standard wager (1,500 / 2,000 / 2,500
 3,000 / 4,000) rides in each result, so the wager selector re-ranks instantly
 without re-solving.
 
+### Need-aware strategy summaries (far / mid / endgame)
+
+The bank-threshold table (`_bank_thresholds`) and the turn shape (`_turn_shape`)
+describe the **points-max** policy — and that policy is wrong once the wager is
+in sight. Its five-die threshold of 3,400 and its "never bank six dice" say *keep
+chasing points*, which past the target is chasing nothing. So both are recomputed
+under the need-aware policy at three representative remaining needs — **far** from
+the target (2,000, or the target if smaller), **mid-game** (1,000), and the
+**endgame** (300) — each from that need's solved `U_r` table, with the same
+`safe / high` per-hand-size presentation. For six fair dice the safe thresholds:
+
+| dice left | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| points-max | 300 | 250 | 450 | 1050 | 3400 | never |
+| far · need 2000 | 300 | 250 | 450 | 1000 | 2000 | 2000 |
+| mid · need 1000 | 300 | 300 | 400 | 700 | 1000 | 1000 |
+| endgame · need 300 | 300 | 300 | 300 | 300 | 300 | 300 |
+
+The thresholds tighten as the need shrinks and, in the endgame, **collapse onto
+the need itself**: bank the instant the tally covers 300, whatever hand you hold.
+That is the qualitatively new behaviour — the piece a player actually uses at the
+table — and it is exactly what the points-max reading, with its rarely-met 3,400,
+cannot show. Every threshold is `≤` its need (never roll past a win) and `≤` the
+points-max threshold (the need-aware policy is never more reckless). Banking the
+win also cuts risk: fair dice bust 19.2% of far-from-target turns but only 14.0%
+of endgame turns. The UI carries all three columns plus the points-max reading
+behind a per-set picker, defaulting to *far*. Each is re-solved on demand from the
+set's g curve — cheap, so it rides along in the same result.
+
 ### The play-along advisor (need-aware)
 
 The threshold table answers "when do I stop?", but the question the player

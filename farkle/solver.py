@@ -730,6 +730,11 @@ def _solve_one(job):
     work = _work_lists(rows)
     res = turn_ev(rows, want_policy=True, names=names, work=work)
     res["need"] = need_curve(rows, max_target=max_target, work=work)
+    # Need-aware strategy at three representative needs: far from the target
+    # (2000, or the target if smaller), mid-game (1000), endgame (300).
+    levels = [("far", min(2000, max_target)), ("mid", 1000), ("end", 300)]
+    res["need_strategy"] = need_strategy(rows, res["need"]["g"], levels,
+                                         work=work, names=names)
     return index, res
 
 
@@ -829,8 +834,9 @@ def _hand_threshold(V, hand, tol=1e-9):
     return None
 
 
-def _bank_thresholds(V, names=None):
-    """When to stop, both summarised and hand by hand.
+def _threshold_summary(thresh, names=None):
+    """Assemble the by_size / hands stop-threshold summary from a per-hand
+    threshold function `thresh(hand)`.
 
     The threshold depends on *which* dice are left, not just how many, so this
     reports two views:
@@ -842,12 +848,15 @@ def _bank_thresholds(V, names=None):
 
       hands    one entry per specific hand, naming the dice, for when you want
                the exact number rather than the safe one.
+
+    Shared by the points-max reading (threshold off V) and the need-aware one
+    (threshold off the solved U_r), so the two present identically.
     """
     by_size, seen, hands = {}, set(), []
     for hand in range(1, 64):
         n = bin(hand).count("1")
-        thresh = _hand_threshold(V, hand)
-        by_size.setdefault(n, []).append(thresh)
+        th = thresh(hand)
+        by_size.setdefault(n, []).append(th)
         if not names:
             continue
         # Two copies of the same die are interchangeable, so hands that differ
@@ -857,7 +866,7 @@ def _bank_thresholds(V, names=None):
         if key in seen:
             continue
         seen.add(key)
-        hands.append({"n": n, "dice": held, "bank": thresh})
+        hands.append({"n": n, "dice": held, "bank": th})
 
     summary = {}
     for n, vals in by_size.items():
@@ -869,6 +878,130 @@ def _bank_thresholds(V, names=None):
 
     hands.sort(key=lambda h: (-h["n"], h["bank"] is None, h["bank"] or 0))
     return {"by_size": summary, "hands": hands}
+
+
+def _bank_thresholds(V, names=None):
+    """When to stop under the points-max policy, summarised and hand by hand."""
+    return _threshold_summary(lambda hand: _hand_threshold(V, hand), names)
+
+
+# --- Need-aware strategy summaries --------------------------------------------
+# The two readings above (bank thresholds, turn shape) describe the points-max
+# policy. These recompute them under the need-aware policy at a fixed remaining
+# need r, from the solved U_r table. The qualitatively new behaviour is the
+# endgame one: the moment the tally covers r the policy banks (it wins), so the
+# thresholds collapse toward r itself instead of the points-max policy's high,
+# rarely-met numbers.
+
+def _need_hand_threshold(U, g, ri, hand, tol=1e-9):
+    """Lowest tally at which the need-aware policy banks this exact hand.
+
+    Unlike the points-max threshold this is never None: banking is forced once
+    the tally reaches the need (that wins), so a hand the policy never stops
+    short with reports r itself. U[k] equals the bank value 1 + g[r - t] exactly
+    when banking was chosen, so a tolerance-guarded compare recovers the choice.
+    """
+    base = hand * ROW
+    for ti in range(1, ri):
+        if U[base + ti] >= 1.0 + g[ri - ti] - tol:   # banking weakly optimal here
+            return ti * STEP
+    return ri * STEP        # only ever stops once the tally covers the need
+
+
+def _need_bank_thresholds(U, g, ri, names=None):
+    """When to stop under the need-aware policy at need r = ri*STEP.
+
+    Same 'safe / high' per-hand-size presentation as the points-max thresholds,
+    but every value is <= r: the policy banks the instant the need is covered."""
+    return _threshold_summary(
+        lambda hand: _need_hand_threshold(U, g, ri, hand), names)
+
+
+def _need_turn_shape(U, work, g, ri):
+    """How a turn ends under the need-aware policy at need r = ri*STEP.
+
+    The mirror of `_turn_shape`: push probability forward from a full hand,
+    following the policy's own bank/roll choice (bank iff 1 + g[r-t] <= roll
+    value) at each state, and record where the mass settles by hand size. Mass a
+    scoring set-aside carries to a tally >= r has *won* -- banked holding the
+    successor hand -- so it is attributed there, exactly as the points-max shape
+    counts a run that reaches the cap. Any move raises the tally, so one upward
+    sweep visits each state after its inflow.
+    """
+    single, multi, farkle = work
+    bustval = 1.0 + g[ri]
+    mass = [0.0] * (64 * ROW)
+    mass[FULL_HAND * ROW] = 1.0
+    shape = {n: {"bank": 0.0, "bust": 0.0, "rolled": 0.0, "bust_if_roll": None}
+             for n in range(1, 7)}
+    for ti in range(ri):
+        gbank = 1.0 + g[ri - ti] if ti > 0 else None
+        for hand in range(1, 64):
+            here = mass[hand * ROW + ti]
+            if here <= 0.0:
+                continue
+            n = bin(hand).count("1")
+            ru = farkle[hand] * bustval
+            for p, off in single[hand]:
+                ru += p * U[off + ti]
+            for p, offs in multi[hand]:
+                ru += p * min(U[o + ti] for o in offs)
+            if gbank is not None and gbank <= ru:      # policy banks here (short of the need)
+                shape[n]["bank"] += here
+                continue
+            shape[n]["rolled"] += here
+            shape[n]["bust"] += here * farkle[hand]
+            for p, off in single[hand]:
+                dst = off + ti
+                if dst % ROW >= ri:                    # tally covers the need: banked win
+                    shape[bin(dst // ROW).count("1")]["bank"] += here * p
+                else:
+                    mass[dst] += here * p
+            for p, offs in multi[hand]:
+                best_o, best_u = offs[0], U[offs[0] + ti]
+                for o in offs[1:]:
+                    u = U[o + ti]
+                    if u < best_u:
+                        best_o, best_u = o, u
+                dst = best_o + ti
+                if dst % ROW >= ri:
+                    shape[bin(dst // ROW).count("1")]["bank"] += here * p
+                else:
+                    mass[dst] += here * p
+    for s in shape.values():
+        s["bust_if_roll"] = s["bust"] / s["rolled"] if s["rolled"] > 0 else None
+    bust = sum(s["bust"] for s in shape.values())
+    total = bust + sum(s["bank"] for s in shape.values())
+    assert abs(total - 1.0) < 1e-9, f"need-aware turn outcomes sum to {total}, not 1"
+    return {"by_size": shape, "bust": bust}
+
+
+def need_strategy(dice_probs, g, levels, work=None, names=None):
+    """Bank thresholds and turn shape under the need-aware policy at several needs.
+
+    `levels` is [(label, r), ...]; for each r within the solved curve it re-solves
+    U_r (cheap, warm-started from the curve's own g[r]) and reports the same
+    'safe / high' thresholds and turn shape the points-max policy exposes, now
+    conditioned on r. Returns [{label, need, bank_at, shape}, ...], the far / mid /
+    endgame columns the UI labels -- the endgame one showing the bank-on-cover
+    behaviour that is the whole point of the upgrade.
+    """
+    if work is None:
+        work = _work_lists(dice_probs)
+    n = len(g) - 1
+    out = []
+    for label, r in levels:
+        ri = r // STEP
+        if ri < 1 or ri > n:
+            continue
+        _, _, _, U = solve_need(work, g, ri, g[ri])
+        out.append({
+            "label": label,
+            "need": r,
+            "bank_at": _need_bank_thresholds(U, g, ri, names),
+            "shape": _need_turn_shape(U, work, g, ri),
+        })
+    return out
 
 
 # --- First-roll expected value ------------------------------------------------
@@ -1094,6 +1227,9 @@ def optimize(inventory, dice_lookup, refine=20, progress=None, fill_die=None,
             },
             "bank_at": res["bank_at"],
             "shape": res["shape"],
+            # The same policy read at three needs (far / mid / endgame), plus the
+            # points-max reading above as a labelled diagnostic in the UI.
+            "need_strategy": res["need_strategy"],
         })
     # Fewest need-aware turns to the chosen wager is the ranking that matters at
     # the table; turn_ev and the legacy renewal ride along as diagnostics. Stage 1

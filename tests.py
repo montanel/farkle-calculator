@@ -614,6 +614,95 @@ def test_advisor():
           f"{cmin:.3f}..{cmax:.3f}")
 
 
+def test_need_strategy():
+    """Need-aware strategy summaries: the far / mid / endgame readings.
+
+    The points-max bank thresholds (5 dice -> 3400, 6 dice -> never) are wrong
+    once the wager is close, because past the target points are worthless. These
+    check the recomputed thresholds are conditioned on the remaining need --
+    capped at it, tightening as it shrinks, and collapsing to "bank the moment you
+    cover it" in the endgame -- and that the turn shape still balances. Small need
+    levels keep the shared curve quick to build.
+    """
+    print("\nNeed-aware strategy summaries (far / mid / endgame)")
+    fair = [DICE_PROBS["Ordinary die"]] * 6
+    names = ["Ordinary die"] * 6
+    work = solver._work_lists(fair)
+    g = solver.need_curve(fair, max_target=800, work=work)["g"]
+    levels = [("far", 800), ("mid", 400), ("end", 150)]
+    strat = solver.need_strategy(fair, g, levels, work=work, names=names)
+    by = {s["label"]: s for s in strat}
+
+    check("three need levels reported", [s["label"] for s in strat],
+          ["far", "mid", "end"])
+
+    # Every threshold is capped at its need -- the policy never rolls past the win.
+    over = [(s["label"], n, v["safe"]) for s in strat
+            for n, v in s["bank_at"]["by_size"].items()
+            if v["safe"] is not None and v["safe"] > s["need"]]
+    check("no threshold exceeds its need", over, [])
+
+    # The safe figure never overshoots a real hand of that size (carried-over).
+    bad = []
+    for s in strat:
+        safe = {n: v["safe"] for n, v in s["bank_at"]["by_size"].items()}
+        for h in s["bank_at"]["hands"]:
+            if h["bank"] is not None and h["bank"] < (safe[h["n"]] or 0):
+                bad.append((s["label"], h))
+    check("safe threshold never overshoots a hand", bad, [])
+
+    # Thresholds tighten as the need shrinks: the five-die stop point falls from
+    # far to mid to endgame, where every hand collapses onto the need itself --
+    # bank the moment the tally covers it. The points-max 3400 is gone.
+    f5, m5, e5 = (by[k]["bank_at"]["by_size"][5]["safe"] for k in ("far", "mid", "end"))
+    ok = f5 >= m5 >= e5 and f5 > e5
+    if not ok:
+        FAILED.append(f"five-die threshold should tighten far>=mid>=end: {f5},{m5},{e5}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'thresholds tighten toward the endgame':<44} "
+          f"5 dice: {f5} -> {m5} -> {e5}")
+    esafe = {n: by["end"]["bank_at"]["by_size"][n]["safe"] for n in range(1, 7)}
+    check("endgame banks the moment the need is covered",
+          all(v == 150 for v in esafe.values()), True)
+
+    # Need-aware thresholds never exceed the points-max ones (None = never bank).
+    V = solver.value_table(fair, work)
+    evmax = solver._bank_thresholds(V, names)["by_size"]
+    worse = [(n, by["far"]["bank_at"]["by_size"][n]["safe"], evmax[n]["safe"])
+             for n in range(1, 7)
+             if by["far"]["bank_at"]["by_size"][n]["safe"] is not None
+             and evmax[n]["safe"] is not None
+             and by["far"]["bank_at"]["by_size"][n]["safe"] > evmax[n]["safe"]]
+    check("need-aware <= points-max thresholds", worse, [])
+
+    # Every turn still ends somewhere (bank + bust = 1); banking the win makes the
+    # endgame bust far less than pushing hard far from the target.
+    for s in strat:
+        tot = s["shape"]["bust"] + sum(v["bank"] for v in s["shape"]["by_size"].values())
+        if abs(tot - 1.0) > 1e-9:
+            FAILED.append(f"need-aware shape sums to {tot} at {s['label']}")
+    print("  ok   need-aware turn outcomes sum to 1")
+    fb, eb = by["far"]["shape"]["bust"], by["end"]["shape"]["bust"]
+    ok = eb < fb
+    if not ok:
+        FAILED.append(f"endgame should bust less than far play: {eb} vs {fb}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'endgame busts less than far play':<44} "
+          f"{eb * 100:.1f}% < {fb * 100:.1f}%")
+
+    # Strong and impossible-face sets: thresholds stay within the need, and the
+    # zero-probability pruning holds up under the min-objective for the Pie die.
+    for nm in ("Weighted die", "Pie die"):
+        dp = [DICE_PROBS[nm]] * 6
+        wk = solver._work_lists(dp)
+        gg = solver.need_curve(dp, max_target=800, work=wk)["g"]
+        st = solver.need_strategy(dp, gg, levels, work=wk)
+        bad = [(s["label"], n) for s in st
+               for n, v in s["bank_at"]["by_size"].items()
+               if v["safe"] is not None and v["safe"] > s["need"]]
+        if bad:
+            FAILED.append(f"{nm}: threshold over need at {bad}")
+    print("  ok   strong and impossible-face sets stay within the need")
+
+
 def test_ranking_matches_bruteforce():
     print("\nStage-1 ranking vs. direct computation")
     names = ["Ordinary die", "King's die", "Weighted die", "Pie die",
@@ -741,6 +830,7 @@ if __name__ == "__main__":
     test_turn_distribution()
     test_need_curve()
     test_advisor()
+    test_need_strategy()
     test_ranking_matches_bruteforce()
     test_pool_and_autofill()
     if "--slow" in sys.argv:

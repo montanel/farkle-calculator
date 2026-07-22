@@ -443,12 +443,66 @@ function sortResults() {
 
 function render(data) {
   lastResults = data.results;
+  for (const r of lastResults) {
+    // The strategy table can be read under four policies: the need-aware one at
+    // three representative needs (far / mid / endgame), then points-max as a
+    // labelled diagnostic. The picker below each set switches between them.
+    r.policies = [...(r.need_strategy || []),
+                  { label: 'pts', need: null, bank_at: r.bank_at, shape: r.shape }];
+  }
   $('results-note').textContent =
     `Weighed ${data.combinations_ranked.toLocaleString()} sets in ${data.rank_seconds}s, `
     + `then solved the top ${data.results.length} exactly in ${data.solve_seconds}s.`;
   sortResults();
   paintResults();
   $('results').style.display = '';
+}
+
+const POL_NAME = { far: 'Far', mid: 'Mid-game', end: 'Endgame', pts: 'Points-max' };
+
+/* The picker buttons under a set: the three need levels, then the points-max
+   diagnostic. The active one is re-rendered into the table below. */
+function polButtons(policies, i) {
+  return policies.map((pol, p) => `
+    <button data-i="${i}" data-p="${p}" class="${p === 0 ? 'on' : ''}">
+      ${POL_NAME[pol.label] || pol.label}${pol.need
+        ? ` <span class="polneed">${pol.need.toLocaleString()}</span>` : ''}
+    </button>`).join('');
+}
+
+function policyNote(pol) {
+  if (pol.label === 'pts') {
+    return `<b>Points-max</b> play &mdash; every turn pushed for maximum points,
+      ignoring the wager. A diagnostic: the ranking and <em>Play along</em> use the
+      need-aware policy instead.`;
+  }
+  const where = { far: 'far from the target', mid: 'mid-game', end: 'the endgame' }[pol.label];
+  return `<b>Need-aware</b>, ${where}: about <b>${pol.need.toLocaleString()}</b> still
+    needed to win. Bank the moment your score covers the need; below that, these
+    are the stop points &mdash; far lower than points-max play, which chases
+    points long past the line.`;
+}
+
+function policyOutro(pol) {
+  const noNumber = pol.label === 'pts'
+    ? ' A row with no number means the maths never finds a reason to pass there.'
+    : '';
+  return `<b>The throw busts</b> is the chance that throw scores nothing. A high
+    figure does not make throwing wrong: the threshold already weighs it. Your last
+    die loses everything <span class="num">${lastDieRisk(pol.shape)}</span> of the
+    time, yet throwing it is the only way to refill the table with all six, and that
+    payoff covers the losses. Whole turns end in a bust
+    <span class="num">${(pol.shape.bust * 100).toFixed(0)}%</span> of the time.${noNumber}`;
+}
+
+function renderPolicy(i, p) {
+  const pol = lastResults[i].policies[p];
+  $(`pol-${i}`).innerHTML = `
+    <p class="polnote">${policyNote(pol)}</p>
+    <table class="rows">${strategyRows(pol.bank_at, pol.shape.by_size)}</table>
+    <p class="caption">${policyOutro(pol)}</p>`;
+  const picker = document.querySelector(`.polpick[data-i="${i}"]`);
+  if (picker) for (const b of picker.children) b.classList.toggle('on', +b.dataset.p === p);
 }
 
 function paintResults() {
@@ -493,21 +547,15 @@ function paintResults() {
               exact number for each combination of dice.
               ${usesFill ? `Includes ${plural(fillDie)}, which the game supplies free.` : ''}
             </p>
-            <table class="rows">${strategyRows(r.bank_at, r.shape.by_size)}</table>
-            <p class="caption">
-              <b>The throw busts</b> is the chance that throw scores nothing. A
-              high figure does not make throwing wrong: the threshold already
-              weighs it. Your last die loses everything
-              <span class="num">${lastDieRisk(r.shape)}</span> of the time, yet
-              throwing it is the only way to refill the table with all six, and
-              that payoff covers the losses. Whole turns end in a bust
-              <span class="num">${(r.shape.bust * 100).toFixed(0)}%</span> of the
-              time. A row with no number means the maths never finds a reason to
-              pass there.
-            </p>
+            <p class="pollabel">How much do you still need to win?</p>
+            <div class="polpick" data-i="${i}">${polButtons(r.policies, i)}</div>
+            <div class="poltable" id="pol-${i}"></div>
           </div>
         </details>`;
     }).join('');
+  // Fill each set's table with its default (far) policy now that the picker
+  // markup exists in the DOM.
+  lastResults.forEach((_, i) => renderPolicy(i, 0));
 }
 
 $('target').addEventListener('change', () => {
@@ -706,6 +754,8 @@ function resetAdvTurn() {
 $('result-list').addEventListener('click', (e) => {
   const p = e.target.closest('.play');
   if (p) return openAdvisor(lastResults[+p.dataset.i]);
+  const pol = e.target.closest('.polpick button');
+  if (pol) return renderPolicy(+pol.dataset.i, +pol.dataset.p);
   const row = e.target.closest('tr.sizerow');
   if (row) {
     row.classList.toggle('open');
