@@ -1,16 +1,22 @@
-"""Audit the shortlist heuristic.
+"""Audit the shortlist heuristic against the need-aware objective.
 
 The app ranks every 6-dice set by first-roll value (cheap) and then solves only
-the top few with the full turn DP. That is the one approximation in the
-pipeline: if the true best set ranks poorly on first-roll value, the shortlist
-misses it.
+the top few exactly. That is the one approximation in the pipeline: if the true
+best set ranks poorly on first-roll value, the shortlist misses it.
 
-This script brute-forces the full DP over EVERY set for small inventories and
-reports where the true optimum sat in the cheap ordering, and what each
-shortlist size would have found.
+The exact metric is now need-aware g[target] -- the fewest expected turns to reach
+a wager -- so the "true best" set is the one MINIMISING g[target]. This script
+brute-forces g over EVERY set for small inventories and reports where that optimum
+sat in the cheap ordering, and what each shortlist size would have found. It
+audits at a short (1500) and a long (4000) target, since the first-roll proxy may
+correlate differently with each.
 
-    python check_filter.py                  # 9-die inventories  (~4 min)
-    python check_filter.py --size 11 -n 2   # bigger and slower  (~8 min each)
+    python check_filter.py                  # 9-die inventories (slow)
+    python check_filter.py --size 7 -n 1    # smaller and quicker
+
+Each need-aware solve is far dearer than the old single turn_ev (a whole g-curve
+per set), so this fans the sets out across the shared solver pool. Keep to small
+inventories.
 """
 
 import argparse
@@ -21,33 +27,44 @@ from farkle import solver
 from farkle.dice import DICE_PROBS, DICE_NAMES
 
 SHORTLIST_SIZES = (4, 8, 12, 20, 30)
+AUDIT_TARGETS = (1500, 4000)   # short and long: the proxy may rank them differently
 
 
 def study(inv, label):
     probs = [DICE_PROBS[n] for n in inv]
-    ranked = solver.rank_combinations(probs)  # the cheap ordering the app uses
+    pool = [(p, 1) for p in probs]              # one of each die
+    ranked = solver.rank_combinations(pool)     # cheap first-roll ordering, best first
+
+    def rows_of(counts):                        # a set's six probability rows
+        rows = []
+        for i, c in enumerate(counts):
+            rows.extend([probs[i]] * c)
+        return rows
 
     t0 = time.time()
-    full = []
-    for ev1, idx in ranked:
-        te = solver.turn_ev([probs[i] for i in idx])["turn_ev"]
-        full.append((te, ev1, idx))
-    full.sort(key=lambda r: -r[0])
-
-    best_te, best_ev1, best_idx = full[0]
-    position = next(i for i, (_, ix) in enumerate(ranked) if ix == best_idx) + 1
+    workers = solver.shared_pool()
+    jobs = [(rows_of(counts), AUDIT_TARGETS) for _, counts in ranked]
+    gvals = list(workers.map(solver._need_targets, jobs))   # {target: g} per set, rank order
+    elapsed = time.time() - t0
 
     print(f"\n{label}: {len(inv)} dice -> {len(ranked)} sets "
-          f"(full solve took {time.time() - t0:.0f}s)")
-    print(f"  true best turn EV {best_te:.0f} (first-roll EV {best_ev1:.0f})")
-    print(f"  it ranked #{position} of {len(ranked)} on first-roll value")
-    for k in SHORTLIST_SIZES:
-        top = {ix for _, ix in ranked[:k]}
-        got = max((te for te, _, ix in full if ix in top), default=0.0)
-        loss = best_te - got
-        verdict = "OPTIMAL" if loss <= 1e-9 else f"{loss:.0f} short ({loss / best_te * 100:.1f}%)"
-        print(f"    shortlist {k:<3} -> {got:7.0f}  {verdict}")
-    return position
+          f"(need-aware solve of all took {elapsed:.0f}s)")
+
+    worst = 0
+    for tgt in AUDIT_TARGETS:
+        col = [g[tgt] for g in gvals]           # g[tgt] of every set, in first-roll order
+        best_i = min(range(len(col)), key=lambda i: col[i])
+        best_g, position = col[best_i], best_i + 1   # ranked is already best-first
+        worst = max(worst, position)
+        print(f"  target {tgt}: true best g={best_g:.3f} "
+              f"(first-roll EV {ranked[best_i][0]:.0f}) ranked #{position} "
+              f"of {len(ranked)} on first-roll value")
+        for k in SHORTLIST_SIZES:
+            got = min(col[:k], default=float("inf"))     # best g within the top-k shortlist
+            loss = got - best_g
+            verdict = "OPTIMAL" if loss <= 1e-9 else f"{loss:.3f} turns worse"
+            print(f"    shortlist {k:<3} -> g {got:7.3f}  {verdict}")
+    return worst
 
 
 def main():
@@ -58,10 +75,12 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
 
+    solver.warm_up()   # build the move table and start the workers once, up front
+
     positions = []
     if args.size == 9:
         positions.append(study(
-            ["Heavenly Kingdom die", "Lucky Die", "Favourable die", "Aranka's die",
+            ["Heavenly Kingdom die", "Lucky die", "Favourable die", "Aranka's die",
              "Odd die", "Ordinary die", "King's die", "Painted die", "Grimy die"],
             "hand-picked strong"))
 
@@ -71,9 +90,15 @@ def main():
                                f"random {args.size}-die #{i + 1}"))
 
     worst = max(positions)
-    print(f"\nWorst position of the true optimum in the cheap ordering: "
-          f"#{worst} (over {len(positions)} inventories)")
-    print(f"Default shortlist is 8, so the margin here is {8 - worst} places.")
+    print(f"\nWorst position of the g-optimum in the cheap ordering: #{worst} "
+          f"(over {len(positions)} inventories, targets {AUDIT_TARGETS})")
+    if worst <= 8:
+        print(f"Default shortlist of 8 has a margin of {8 - worst} places.")
+    elif worst <= 20:
+        print(f"Exceeds a shortlist of 8, but the app default (refine=20) still "
+              f"covers it by {20 - worst} places.")
+    else:
+        print(f"Exceeds even 20 -- raise the shortlist default above #{worst}.")
 
 
 if __name__ == "__main__":

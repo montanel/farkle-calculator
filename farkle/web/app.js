@@ -293,7 +293,8 @@ $('go').addEventListener('click', async () => {
     const res = await fetch('/api/optimize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inventory: owned, refine: Number($('depth').value) }),
+      body: JSON.stringify({ inventory: owned, refine: Number($('depth').value),
+                             target: Number($('target').value) }),
     });
     const started = await res.json();
     if (!res.ok) throw new Error(started.error || 'request failed');
@@ -432,12 +433,12 @@ function handName(dice) {
 let lastResults = [];   // the advisor needs the full dice list of a chosen set
 let target = '4000';    // the wager the sets are ranked for, matching #target
 
-/* Fewer turns to reach the chosen wager wins, so that is the sort key. The keys
-   arrive as strings ("4000") because JSON has no integer keys -- `target` is
-   kept as a string to match. Re-sorting is client-side: the same sets were
-   solved regardless of wager, only their order changes. */
+/* Fewest need-aware turns to the chosen wager wins, so g[target] is the sort key.
+   The keys arrive as strings ("4000") because JSON has no integer keys -- `target`
+   is kept as a string to match. Re-sorting is client-side: g at every standard
+   wager is in the payload, so changing the wager only reorders, never re-solves. */
 function sortResults() {
-  lastResults.sort((a, b) => a.turns_to_win[target] - b.turns_to_win[target]);
+  lastResults.sort((a, b) => a.g[target] - b.g[target]);
 }
 
 function render(data) {
@@ -470,7 +471,7 @@ function paintResults() {
               <div class="rank">${i + 1}</div>
               <div class="setline">${chips}</div>
               <div class="score">
-                <div class="n">${r.turns_to_win[target].toFixed(1)}</div>
+                <div class="n">${r.g[target].toFixed(1)}</div>
                 <div class="unit">turns to win</div>
                 <div class="sub">${Math.round(r.turn_ev).toLocaleString()} pts / turn</div>
               </div>
@@ -520,24 +521,54 @@ $('target').addEventListener('change', () => {
 // enters the faces and the server answers with the DP's own move: what to set
 // aside, then throw or pass.
 
-let adv = null;   // { names[6], mask, t, faces{}, last }
+let adv = null;   // { names[6], g, target, banked, mask, t, faces{}, last }
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
+/* The advice is conditioned on the remaining need, so the advisor tracks the
+   wager and the player's banked game total (need = wager - banked) on top of
+   the within-turn tally. The set's need curve (r.need_g) rides along so the
+   server never re-solves it. */
 function openAdvisor(r) {
-  adv = { names: r.dice.slice(), mask: 63, t: 0, faces: {}, last: null };
+  const tgt = Number(target) || 4000;   // open at the wager the results are ranked for
+  adv = { names: r.dice.slice(), g: r.need_g || null, target: tgt, banked: 0,
+          mask: 63, t: 0, faces: {}, last: null };
   $('advisor').style.display = '';
   $('adv-set').innerHTML = r.counts.map(([name, c]) => `
     <span class="chip" data-name="${esc(name)}">
       <img src="img/${byName[name] ? byName[name].icon : ''}" alt="">
       ${esc(name)}${c > 1 ? ` <span class="x">&times;${c}</span>` : ''}
     </span>`).join('');
+  $('adv-target').value = String(tgt);
+  $('adv-banked').max = tgt;
+  $('adv-banked').value = 0;
   $('adv-t').value = 0;
+  renderAdvNeed();
   renderAdvEntry();
-  // Build this set's tables now, while the player is still clicking faces in.
-  fetch('/api/advise', { method: 'POST', headers: JSON_HEADERS,
-    body: JSON.stringify({ dice: adv.names, warm: true }) }).catch(() => {});
+  // Build this (set, wager)'s tables now, while the player enters faces; shipping
+  // the need curve lets the server skip the dear solve.
+  warmAdvisor();
   $('advisor').scrollIntoView({ behavior: 'smooth' });
+}
+
+const advNeed = () => Math.max(0, adv.target - adv.banked);
+
+function renderAdvNeed() {
+  const need = advNeed();
+  $('adv-need').innerHTML = need > 0
+    ? `need <b>${need.toLocaleString()}</b> to win`
+    : `<b>already won</b> &mdash; you hold ${adv.banked.toLocaleString()}`;
+}
+
+function warmAdvisor() {
+  fetch('/api/advise', { method: 'POST', headers: JSON_HEADERS,
+    body: JSON.stringify({ dice: adv.names, warm: true,
+                           target: adv.target, g: adv.g }) }).catch(() => {});
+}
+
+function syncBanked() {
+  $('adv-banked').value = adv.banked;
+  renderAdvNeed();
 }
 
 function renderAdvEntry() {
@@ -579,7 +610,8 @@ async function doAdvise() {
   $('adv-go').disabled = true;
   try {
     const res = await fetch('/api/advise', { method: 'POST', headers: JSON_HEADERS,
-      body: JSON.stringify({ dice: adv.names, mask: adv.mask, t: adv.t, faces }) });
+      body: JSON.stringify({ dice: adv.names, mask: adv.mask, t: adv.t,
+                             banked: adv.banked, target: adv.target, g: adv.g, faces }) });
     const out = await res.json();
     if (!res.ok) throw new Error(out.error || `request failed (${res.status})`);
     adv.last = out;
@@ -590,7 +622,19 @@ async function doAdvise() {
   updateAdvGo();
 }
 
+/* The advice is now in turns-to-win, not points: banking the instant the tally
+   covers the need wins outright, and otherwise the choice is whichever costs
+   fewer expected turns, with the chance of clearing the need this very turn
+   shown alongside. */
 function renderAdvice(o) {
+  if (o.won_already) {
+    $('adv-out').innerHTML = `
+      <div class="advice">
+        <p class="adv-action">You already hold the wager &mdash; the game is won.</p>
+        <p class="adv-ev">Lower "your score so far" to plan an earlier turn.</p>
+      </div>`;
+    return;
+  }
   if (o.bust) {
     $('adv-out').innerHTML = `
       <div class="advice advice--bad">
@@ -608,30 +652,45 @@ function renderAdvice(o) {
       <img src="img/${d.icon}" alt=""> ${esc(d.name)}
       <span class="rolled">${adv.faces[i]}</span></span>`;
   }).join('');
-  const bank = o.action === 'bank';
-  const rv = o.roll_value === null ? null : Math.round(o.roll_value).toLocaleString();
-  const evLine = bank
-    ? (rv === null
-        ? 'The scoring cap has been reached; the game banks it from here.'
-        : `Passing banks <b>${o.turn_score.toLocaleString()}</b> for certain;
-           throwing on would average ${rv}.`)
-    : `Throwing on is worth <b>${rv}</b> on average;
-       passing now would bank only ${o.turn_score.toLocaleString()}.`;
+
+  const remaining = Math.max(0, o.need - o.turn_score);
+  const winPct = `${(o.clear_prob * 100).toFixed(0)}%`;
+  const rollVs = `Throwing on wins in about <b>${o.roll_turns}</b> more turns
+    vs ${o.bank_turns} for banking now &mdash; and a <b>${winPct}</b> chance you
+    clear the ${o.need.toLocaleString()} this very turn.`;
+
+  let actionLine, evLine, nextLabel;
+  if (o.won) {
+    actionLine = `Then PASS &mdash; banking ${o.turn_score.toLocaleString()}
+                  reaches the wager. <b>You win.</b>`;
+    evLine = `${o.turn_score.toLocaleString()} clears the
+              ${o.need.toLocaleString()} you needed.`;
+    nextLabel = 'Won &mdash; start a new game';
+  } else if (o.action === 'bank') {
+    actionLine = `Then PASS &mdash; bank the ${o.turn_score.toLocaleString()}.`;
+    evLine = `Banking wins in about <b>${o.bank_turns}</b> more turns on average,
+              fewer than the ${o.roll_turns} throwing on would cost. Still need
+              ${remaining.toLocaleString()} after this.`;
+    nextLabel = `Banked ${o.turn_score.toLocaleString()} &mdash; next turn`;
+  } else if (o.hot) {
+    actionLine = 'Then THROW AGAIN &mdash; hot dice, all six come back.';
+    evLine = rollVs;
+    nextLabel = 'I threw all six &mdash; enter the new roll';
+  } else {
+    actionLine = `Then THROW the other ${o.reroll_count}
+                  ${o.reroll_count === 1 ? 'die' : 'dice'}.`;
+    evLine = rollVs;
+    nextLabel = `I threw the ${o.reroll_count} &mdash; enter the new roll`;
+  }
+
   $('adv-out').innerHTML = `
-    <div class="advice">
+    <div class="advice${o.won ? ' advice--win' : ''}">
       <p class="adv-sub">Set aside these &mdash; worth ${o.points.toLocaleString()},
          round tally ${o.turn_score.toLocaleString()}:</p>
       <p class="adv-keep">${keeps}</p>
-      <p class="adv-action">${bank
-        ? `Then PASS &mdash; bank the ${o.turn_score.toLocaleString()}`
-        : o.hot
-          ? 'Then THROW AGAIN &mdash; hot dice, all six come back'
-          : `Then THROW the other ${o.reroll_count}
-             ${o.reroll_count === 1 ? 'die' : 'dice'}`}</p>
+      <p class="adv-action">${actionLine}</p>
       <p class="adv-ev">${evLine}</p>
-      <button id="adv-next" class="btn-sm">${bank
-        ? 'Banked &mdash; start the next turn'
-        : `I threw ${o.hot ? 'all six' : `the ${o.reroll_count}`} &mdash; enter the new roll`}</button>
+      <button id="adv-next" class="btn-sm">${nextLabel}</button>
     </div>`;
 }
 
@@ -670,12 +729,45 @@ $('adv-dice').addEventListener('click', (e) => {
 $('adv-out').addEventListener('click', (e) => {
   if (e.target.id !== 'adv-next') return;
   const o = adv.last;
-  if (!o || o.bust || o.action === 'bank') return resetAdvTurn();
-  adv.mask = o.next_mask;
+  if (!o) return resetAdvTurn();
+  if (o.won) {                 // game over: reset the game score and start fresh
+    adv.banked = 0;
+    syncBanked();
+    return resetAdvTurn();
+  }
+  if (o.bust) return resetAdvTurn();     // busted turn: game score unchanged
+  if (o.action === 'bank') {             // banked a partial score: carry it into the game total
+    adv.banked = Math.min(adv.target, adv.banked + o.turn_score);
+    syncBanked();
+    return resetAdvTurn();
+  }
+  adv.mask = o.next_mask;                // rerolling: continue the same turn
   adv.t = o.turn_score;
   adv.faces = {};
   $('adv-t').value = adv.t;
   renderAdvEntry();
+});
+
+// Changing the wager re-conditions everything; rebuild the server-side tables.
+$('adv-target').addEventListener('change', () => {
+  adv.target = Number($('adv-target').value);
+  $('adv-banked').max = adv.target;
+  if (adv.banked > adv.target) { adv.banked = adv.target; $('adv-banked').value = adv.banked; }
+  renderAdvNeed();
+  $('adv-out').innerHTML = '';
+  adv.last = null;
+  warmAdvisor();
+});
+
+// The banked game total sets the remaining need (need = wager - banked).
+$('adv-banked').addEventListener('change', () => {
+  const v = Math.max(0, Math.min(adv.target,
+    Math.round((+$('adv-banked').value || 0) / 50) * 50));
+  $('adv-banked').value = v;
+  adv.banked = v;
+  renderAdvNeed();
+  $('adv-out').innerHTML = '';
+  adv.last = null;
 });
 
 // The tally is editable so the tool can pick up a turn mid-way, or follow a

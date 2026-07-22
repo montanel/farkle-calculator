@@ -69,7 +69,9 @@
           <h2>Best Sets</h2>
           <label class="target-pick">wager
             <select id="target" class="btn-sm">
+              <option value="1500">1,500</option>
               <option value="2000">2,000</option>
+              <option value="2500">2,500</option>
               <option value="3000">3,000</option>
               <option value="4000" selected>4,000</option>
             </select>
@@ -83,6 +85,19 @@
         <div class="bar"><h2>Play along</h2></div>
         <div class="body">
           <div id="adv-set" class="adv-chips"></div>
+          <div class="adv-game">
+            <label for="adv-target">Wager</label>
+            <select id="adv-target" class="btn-sm">
+              <option value="1500">1,500</option>
+              <option value="2000">2,000</option>
+              <option value="2500">2,500</option>
+              <option value="3000">3,000</option>
+              <option value="4000" selected>4,000</option>
+            </select>
+            <label for="adv-banked">Your score so far</label>
+            <input type="number" id="adv-banked" min="0" max="4000" step="50" value="0">
+            <span id="adv-need" class="adv-need">need <b>4,000</b> to win</span>
+          </div>
           <div class="adv-score">
             <label for="adv-t">Round tally (the middle number)</label>
             <input type="number" id="adv-t" min="0" max="10000" step="50" value="0">
@@ -103,10 +118,12 @@
             <tr>
               <th>Turns to win</th>
               <td>How many turns, on average, the set needs to reach the
-                  <b>wager</b> you pick above the table &mdash; the number sets
-                  are ranked by, lowest first. It already prices in busting: a
-                  turn that Farkles banks nothing yet still costs you a turn, so
-                  a reckless set climbs here even when its points look good.</td>
+                  <b>wager</b> you pick above the table, playing each turn
+                  optimally <em>for that wager</em> &mdash; banking the instant a
+                  pass would cross the line rather than chasing points. This is
+                  the number sets are ranked by, lowest first, and it already
+                  prices in busting: a Farkle banks nothing yet still costs a turn,
+                  so a reckless set climbs here even when its points look good.</td>
             </tr>
             <tr>
               <th>Points / turn</th>
@@ -127,7 +144,10 @@
               <th>Optimal strategy</th>
               <td>Click any set to see when to throw and when to pass, or use
                   <em>Play along</em> to enter each throw as you make it and be
-                  told exactly which dice to set aside.</td>
+                  told exactly which dice to set aside. Play along is
+                  <b>need-aware</b>: tell it the wager and your score so far and
+                  it plays for the win &mdash; banking the instant you cover the
+                  remaining need, not chasing points past the line.</td>
             </tr>
             <tr>
               <th>Ordinary dice</th>
@@ -136,9 +156,9 @@
             </tr>
             <tr>
               <th>Caveat</th>
-              <td>Turns to win assumes you play every turn for maximum points;
-                  in truth, once a single bank would cross the line you just take
-                  it, so the final turn runs a touch faster than shown.</td>
+              <td>Turns to win assumes a solo race to a fixed wager &mdash; it
+                  plays for the target, not against an opponent, so it does not
+                  yet account for a rival who might reach the line first.</td>
             </tr>
           </table>
         </div>

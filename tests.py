@@ -515,64 +515,103 @@ def test_turn_distribution():
 
 
 def test_advisor():
-    print("\nPlay-along advisor")
+    """The need-aware advisor: the turns-minimising move for one rolled hand.
+
+    Unlike the old points-max advisor, this banks the instant a set-aside covers
+    the remaining need (it wins), so its endgame advice is qualitatively new. The
+    consistency audit is the guard the whole upgrade exists for: `advise` must
+    reproduce the U_r argmin and the bank/roll comparison the solver would make,
+    or the advisor and solver have silently drifted apart.
+    """
+    print("\nPlay-along advisor (need-aware)")
     fair = [DICE_PROBS["Ordinary die"]] * 6
+    STEP, ROW = solver.STEP, solver.ROW
+    tgt = 800   # small target keeps the shared need curve quick to build
 
-    # A full straight scores every die: keep all six, hot dice refill the
-    # table, and six fair dice always throw on.
-    r = solver.advise(fair, 63, {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6}, 0)
-    check("straight: set aside all six", r["keep"], [0, 1, 2, 3, 4, 5])
-    check("straight is worth 1500", r["points"], 1500)
-    check("hot dice refill the table", (r["hot"], r["next_mask"]), (True, FULL_HAND))
-    check("with six back, keep throwing", r["action"], "reroll")
+    # Endgame: the need-aware policy banks the moment the tally covers the need.
+    # A 5 set aside lifts 250 -> 300 = need, which wins outright: bank, not roll.
+    r = solver.advise(fair, 0b1, {0: 5}, 250, need=300, target=tgt)
+    check("covering the need wins", (r["won"], r["action"]), (True, "bank"))
+    check("winning throw clears for certain", r["clear_prob"], 1.0)
+    check("kept the scoring 5", (r["keep"], r["points"]), ([0], 50))
 
-    # Nothing scores: no 1s or 5s, no triple, no straight.
-    r = solver.advise(fair, 63, {0: 2, 1: 2, 2: 3, 3: 4, 4: 6, 5: 6}, 300)
+    # A full straight covers the need too (1500 >= 800), so even with hot dice
+    # back the play is to bank the win rather than chase points -- the endgame
+    # behaviour the points-max advisor never showed.
+    r = solver.advise(fair, 63, {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6}, 0,
+                      need=tgt, target=tgt)
+    check("straight worth 1500", r["points"], 1500)
+    check("hot dice, but the need is met", (r["hot"], r["won"]), (True, True))
+    check("so bank the win, do not roll on", r["action"], "bank")
+
+    # Far from the target with five dice back, keeping a single 1 and throwing on
+    # is fewer expected turns than banking 100 -- the advisor rolls.
+    r = solver.advise(fair, 63, {0: 1, 1: 2, 2: 3, 3: 4, 4: 6, 5: 6}, 0,
+                      need=tgt, target=tgt)
+    check("kept the lone 1", (r["keep"], r["points"]), ([0], 100))
+    check("far from target: throw on", r["action"], "reroll")
+    ok = r["roll_turns"] < r["bank_turns"] and 0 < r["clear_prob"] < 1
+    if not ok:
+        FAILED.append(f"throw-on economics off: {r}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'rolling costs fewer turns than banking':<44} "
+          f"{r['roll_turns']} < {r['bank_turns']}, win {r['clear_prob'] * 100:.1f}%")
+
+    # Nothing scores.
+    r = solver.advise(fair, 63, {0: 2, 1: 2, 2: 3, 3: 4, 4: 6, 5: 6}, 300,
+                      need=500, target=tgt)
     check("farkle detected, pile lost", (r["bust"], r["lost"]), (True, 300))
 
-    # Two dice left, only the 5 scores; 400 + 50 = 450 is past the one-die
-    # threshold of 300, so pass.
-    r = solver.advise(fair, 0b11, {0: 5, 1: 2}, 400)
-    check("forced single keep", (r["keep"], r["points"]), ([0], 50))
-    check("past the threshold: pass", r["action"], "bank")
-
-    # Same roll at t=0: 50 in hand is under the threshold, so throw the one die.
-    r = solver.advise(fair, 0b11, {0: 5, 1: 2}, 0)
-    check("under the threshold: throw", (r["action"], r["reroll_count"]), ("reroll", 1))
-
-    # At the cap banking is forced no matter what.
-    r = solver.advise(fair, 0b1, {0: 5}, 10_000)
-    check("cap forces a pass", (r["action"], r["roll_value"]), ("bank", None))
-
-    # The advice must reproduce the DP's own argmax at every state, and its
-    # bookkeeping must partition the thrown dice. Random-audit a wide slice.
+    # Consistency audit: at every state, `advise` must pick the U_r argmin set-
+    # aside and make the same bank/roll call the solver's own comparison would.
     import random
-    rng = random.Random(7)
-    V = solver.value_table(fair)
+    rng = random.Random(13)
+    ctx = solver.prepare(fair, tgt)
     mv = solver.moves()
-    bad = []
-    for _ in range(300):
+    bad, cmin, cmax = [], 2.0, -1.0
+    for _ in range(400):
+        need = STEP * rng.randrange(1, tgt // STEP + 1)
+        ri = need // STEP
+        U = ctx.u_table(ri)
+        t = STEP * rng.randrange(0, ri)                 # tally below the need
         mask = rng.randrange(1, 64)
         mem = [i for i in range(6) if mask >> i & 1]
         faces = {i: rng.randrange(1, 7) for i in mem}
-        t = 50 * rng.randrange(0, 120)
-        r = solver.advise(fair, mask, faces, t)
+        r = solver.advise(fair, mask, faces, t, need=need, target=tgt)
         oid = sum((faces[i] - 1) * 6 ** j for j, i in enumerate(mem))
         opts = mv[mask][oid]
         if not opts:
             if not r.get("bust"):
-                bad.append((mask, faces, t, "missed farkle"))
+                bad.append((mask, faces, t, need, "missed farkle"))
             continue
-        best = max(V[nm * solver.ROW + t // 50 + p // 50] for nm, p in opts)
-        got = V[r["next_mask"] * solver.ROW + r["turn_score"] // 50]
+        # Independent argmin over set-asides (U = 1 once the tally covers need).
+        best = min(U[nm * ROW + (t + p) // STEP] for nm, p in opts)
+        got = U[r["next_mask"] * ROW + r["turn_score"] // STEP]
         if abs(got - best) > 1e-9:
-            bad.append((mask, faces, t, "suboptimal"))
+            bad.append((mask, faces, t, need, "not the argmin"))
+        # Independent bank/roll decision from the same table.
+        ti2 = r["turn_score"] // STEP
+        if ti2 >= ri:
+            if not r["won"] or r["action"] != "bank":
+                bad.append((mask, faces, t, need, "should have won"))
+        else:
+            gbank = 1.0 + ctx.g[ri - ti2]
+            ru = solver._need_roll_value(U, ctx.work, ctx.g, ri, r["next_mask"], ti2)
+            want = "bank" if gbank <= ru else "reroll"
+            if r["action"] != want:
+                bad.append((mask, faces, t, need, f"{r['action']} != {want}"))
+        # Bookkeeping: kept and rerolled dice must partition the throw.
         kept = sum(1 << i for i in r["keep"])
         legal = (kept | r["next_mask"] == mask if not r["hot"]
                  else kept == mask and r["next_mask"] == FULL_HAND)
-        if not legal or kept & r["next_mask"] and not r["hot"]:
-            bad.append((mask, faces, t, "kept/reroll not a partition"))
-    check("advice == DP argmax (300 random states)", bad, [])
+        if not legal or (kept & r["next_mask"] and not r["hot"]):
+            bad.append((mask, faces, t, need, "kept/reroll not a partition"))
+        cmin, cmax = min(cmin, r["clear_prob"]), max(cmax, r["clear_prob"])
+    check("advice == U_r argmin (400 random states)", bad, [])
+    ok = 0.0 <= cmin <= cmax <= 1.0
+    if not ok:
+        FAILED.append(f"clear_prob out of [0,1]: {cmin}..{cmax}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'win-this-turn probability stays in [0,1]':<44} "
+          f"{cmin:.3f}..{cmax:.3f}")
 
 
 def test_ranking_matches_bruteforce():
@@ -602,15 +641,20 @@ def test_pool_and_autofill():
     check("3 distinct, six each", solver.count_multisets([6, 6, 6], 6), 28)
     check("nothing to pick from", solver.count_multisets([], 6), 0)
 
-    # Owning two of a die must allow using both, and no more.
+    # Owning two of a die must allow using both, and no more. max_target=1500
+    # bounds the (now need-aware) solve so the selection logic can be tested
+    # without paying for a full g-curve to 4000 on every candidate.
     res = solver.optimize({"Weighted die": 2}, DICE_PROBS, refine=4,
-                          fill_die=DEFAULT_DIE)
+                          fill_die=DEFAULT_DIE, target=1500, max_target=1500)
     counts = {n: c for r in res["results"] for n, c in r["counts"]}
     over = [r["counts"] for r in res["results"]
             if dict(r["counts"]).get("Weighted die", 0) > 2]
     check("quantity cap respected", over, [])
     check("selections considered", res["combinations_ranked"], 3)
 
+    # Results are ranked by need-aware g at the chosen wager, lowest first.
+    gs = [r["g"][1500] for r in res["results"]]
+    check("ranked ascending by g[target]", gs, sorted(gs))
     best = res["results"][0]
     check("best uses both special dice plus fill",
           sorted(best["counts"]), [["Ordinary die", 4], ["Weighted die", 2]])
@@ -619,10 +663,14 @@ def test_pool_and_autofill():
             FAILED.append(f"selection is not six dice: {r['counts']}")
     print("  ok   every selection is exactly six dice")
 
-    # An all-ordinary hand must reproduce the plain fair-dice value.
+    # An all-ordinary hand must reproduce the plain fair-dice value, and its
+    # g[1500] must match the standalone need curve (optimize rounds g to 3 dp).
     allord = next(r for r in res["results"]
                   if dict(r["counts"]).get("Ordinary die") == 6)
     close("six ordinary dice == fair-dice baseline", allord["turn_ev"], 564.4, 0.2)
+    close("optimize g[1500] == need_curve g[1500]", allord["g"][1500],
+          solver.need_curve([DICE_PROBS["Ordinary die"]] * 6,
+                            max_target=1500)["g"][30], 1e-3)
 
     # Without a fill die, fewer than six owned dice means nothing to solve.
     empty = solver.optimize({"Weighted die": 2}, DICE_PROBS, refine=4, fill_die=None)

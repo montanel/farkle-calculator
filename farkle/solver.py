@@ -155,12 +155,15 @@ def value_table(dice_probs, work=None):
     return V
 
 
-def turn_ev(dice_probs, want_policy=False, names=None):
+def turn_ev(dice_probs, want_policy=False, names=None, work=None):
     """Expected points banked in one turn with six given dice, under optimal play.
 
     `names` labels each die so the policy can say which hand a threshold is for.
+    `work` accepts a prebuilt `_work_lists` result so a caller that also runs the
+    need-aware solve does not build it twice.
     """
-    work = _work_lists(dice_probs) if want_policy else None
+    if work is None and want_policy:
+        work = _work_lists(dice_probs)
     V = value_table(dice_probs, work)
     result = {"turn_ev": V[FULL_HAND * ROW]}
     if want_policy:
@@ -171,86 +174,202 @@ def turn_ev(dice_probs, want_policy=False, names=None):
     return result
 
 
-# --- Play-along advisor -------------------------------------------------------
-# The tables above summarise the policy; this answers the question the player
-# actually faces mid-game: "these dice just landed -- what do I set aside, and
-# do I throw again or pass?" It reads the same solved V, so the advice IS the
-# optimal policy, not a paraphrase of it.
+# --- Need-aware play-along advisor --------------------------------------------
+# The strategy tables summarise a policy; this answers the live question the
+# player faces each throw: "these dice landed and I still need r to win -- what
+# do I keep, and do I throw again or bank?" It reads the need-aware U_r table
+# (see need_curve below), so the advice IS the turns-minimising policy at need r,
+# not the old points-max one. The moment a set-aside lifts the tally to >= r,
+# banking wins outright and is always chosen. Definitions live with need_curve.
 
 _ADVICE_CACHE = {}
 
 
-def prepare(rows):
-    """(V, work) for one set of six dice, cached. ~1.2s cold, instant after."""
-    key = tuple(tuple(r) for r in rows)
+class _NeedCtx:
+    """Everything needed to advise one (dice set, target): the work lists, the g
+    curve out to the target, and a lazily-filled cache of solved U_r tables. A
+    single r's U table is re-solved on demand rather than stored for every r --
+    cheap, since the curve already pins each g[r] and the sweep warm-starts there.
+    """
+    __slots__ = ("work", "g", "target", "ucache")
+
+    def __init__(self, work, g, target):
+        self.work = work
+        self.g = g
+        self.target = target
+        self.ucache = {}
+
+    def u_table(self, ri):
+        U = self.ucache.get(ri)
+        if U is None:
+            _, _, _, U = solve_need(self.work, self.g, ri, self.g[ri])
+            self.ucache[ri] = U
+        return U
+
+
+def prepare(rows, target=None, g=None):
+    """Cached _NeedCtx for one (dice set, target).
+
+    Fast when `g` (the set's need curve) is supplied -- only the work lists are
+    built. Otherwise the curve is solved here to `target`, which for the full
+    4,000 is the dear part of the whole computation, so callers that already have
+    it (the optimiser ships it per set) should pass it in. Cached per (set,
+    target) so reopening the advisor or asking again is instant.
+    """
+    if target is None:
+        target = DEFAULT_TARGET
+    key = (tuple(tuple(r) for r in rows), target)
     hit = _ADVICE_CACHE.get(key)
     if hit is None:
         if len(_ADVICE_CACHE) >= 8:
             _ADVICE_CACHE.pop(next(iter(_ADVICE_CACHE)))
         work = _work_lists(rows)
-        hit = (value_table(rows, work), work)
+        n = target // STEP
+        gc = g if (g is not None and len(g) > n) else \
+            need_curve(rows, max_target=target, work=work)["g"]
+        hit = _NeedCtx(work, gc, target)
         _ADVICE_CACHE[key] = hit
     return hit
 
 
-def _roll_value(V, work, hand, ti):
-    """Expected final banked score if `hand` is thrown at turn score ti*STEP.
+def _need_roll_value(U, work, g, ri, hand, ti):
+    """Expected turns-to-win from throwing `hand` at tally ti*STEP, need ri*STEP.
 
-    One state's worth of the value_table inner loop. V[hand] itself is
-    max(bank, roll); this is the roll side alone, needed to show what throwing
-    would have been worth even when passing is the right call.
+    The roll side of U_r(hand, ti) alone (bank omitted): a farkle ends the turn
+    worth 1 + g[r], and every scoring outcome takes its turns-minimising set-
+    aside. Lets the advisor show what throwing on is worth even when banking is
+    the call.
     """
-    single, multi, _ = work
-    acc = 0.0
+    single, multi, farkle = work
+    ru = farkle[hand] * (1.0 + g[ri])
     for p, off in single[hand]:
-        acc += p * V[off + ti]
+        ru += p * U[off + ti]
     for p, offs in multi[hand]:
-        acc += p * max(V[o + ti] for o in offs)
-    return acc
+        ru += p * min(U[o + ti] for o in offs)
+    return ru
 
 
-def advise(rows, mask, faces, t):
-    """The optimal play for one rolled hand.
+def _need_clear_prob(U, work, g, ri, start_hand, start_ti):
+    """P(this turn reaches the need and banks the win) from (start_hand, start_ti).
 
-    rows: the set's six probability rows, in a fixed order.
-    mask: which of the six dice were just thrown (bit i = die i).
-    faces: {die index: face 1..6} for every die in `mask`.
-    t: points set aside earlier this turn (the round tally), multiple of STEP.
-
-    Chooses the set-aside maximising V(remaining hand, t + points) -- the same
-    argmax the backward pass scored -- then reads the throw/pass decision off
-    the next state. Ties go to the larger set-aside, which banks more if the
-    turn ends here.
+    A forward pass over the solved U_r under the need-aware policy, mirroring
+    `_turn_shape`: mass a scoring outcome carries to ti >= ri has won this turn;
+    mass the policy banks below r, or that farkles, has not. Every set-aside
+    raises the tally, so one upward sweep over ti visits each state after its
+    inflow. Used to show the player their chance of winning outright this turn.
     """
-    V, work = prepare(rows)
+    single, multi, farkle = work
+    bustval = 1.0 + g[ri]
+    mass = [0.0] * (64 * ROW)
+    mass[start_hand * ROW + start_ti] = 1.0
+    clear = 0.0
+    for ti in range(start_ti, ri):
+        gbank = 1.0 + g[ri - ti] if ti > 0 else None
+        for hand in range(1, 64):
+            here = mass[hand * ROW + ti]
+            if here <= 0.0:
+                continue
+            ru = farkle[hand] * bustval
+            for p, off in single[hand]:
+                ru += p * U[off + ti]
+            for p, offs in multi[hand]:
+                ru += p * min(U[o + ti] for o in offs)
+            if gbank is not None and gbank <= ru:   # policy banks below r: no win this turn
+                continue
+            for p, off in single[hand]:             # policy rolls; farkle mass simply lost
+                dst = off + ti
+                if dst % ROW >= ri:
+                    clear += here * p               # carried past the need -> banked win
+                else:
+                    mass[dst] += here * p
+            for p, offs in multi[hand]:
+                best_o, best_u = offs[0], U[offs[0] + ti]
+                for o in offs[1:]:
+                    u = U[o + ti]
+                    if u < best_u:
+                        best_o, best_u = o, u
+                dst = best_o + ti
+                if dst % ROW >= ri:
+                    clear += here * p
+                else:
+                    mass[dst] += here * p
+    return clear
+
+
+def advise(rows, mask, faces, t, need, target=None, g=None):
+    """The turns-minimising play for one rolled hand at remaining need `need`.
+
+    rows:   the set's six probability rows, in a fixed order.
+    mask:   which of the six dice were just thrown (bit i = die i).
+    faces:  {die index: face 1..6} for every die in `mask`.
+    t:      points set aside earlier this turn (the round tally), a multiple of STEP.
+    need:   points still required to win (target minus everything banked so far).
+    target: the wager the g curve is built for (cache key / curve length); defaults
+            to the smallest standard target that covers `need`.
+    g:      an already-solved g curve for this set, if the caller has one.
+
+    Chooses the set-aside minimising U_need(next hand, t + pts) -- the turns-to-win
+    argmin, the mirror of the points-max advisor's argmax -- then reads throw/bank
+    off the same table. Any set-aside carrying the tally to >= need wins outright,
+    so it scores the minimum U = 1 and is always preferred and banked. Ties go to
+    the larger set-aside, which banks more if the turn ends here.
+    """
+    if target is None:
+        target = next((tt for tt in NEED_TARGETS if tt >= need), MAX_TARGET)
+    ctx = prepare(rows, target, g)
+    gc = ctx.g
+    n = len(gc) - 1
+    ri = need // STEP
+    clamped = ri > n                            # need past the solved curve: clamp and flag
+    if clamped:
+        ri = n
+
     mem = [i for i in range(6) if mask >> i & 1]
     oid = sum((faces[i] - 1) * 6 ** j for j, i in enumerate(mem))
     options = moves()[mask][oid]
     if not options:
-        return {"bust": True, "lost": t}
+        return {"bust": True, "lost": t, "need": need, "clamped": clamped}
 
-    ti = t // STEP
-    _, pts, next_mask = max(
-        (V[nm * ROW + ti + p // STEP], p, nm) for nm, p in options)
+    U = ctx.u_table(ri)
 
-    # next_mask == FULL_HAND means the throw was fully scored (hot dice); the
-    # kept dice are then the whole throw, not mask & ~FULL_HAND.
+    best_u = pts = next_mask = None
+    for nm, p in options:
+        u = U[nm * ROW + (t + p) // STEP]       # U = 1 (a win) once t + p >= need
+        if (best_u is None or u < best_u - 1e-12
+                or (abs(u - best_u) <= 1e-12 and p > pts)):
+            best_u, pts, next_mask = u, p, nm
+
+    # next_mask == FULL_HAND means the throw was fully scored (hot dice); the kept
+    # dice are then the whole throw, not mask & ~FULL_HAND.
     kept = mask if next_mask == FULL_HAND else mask & ~next_mask
     t2 = t + pts
     ti2 = t2 // STEP
-    forced = ti2 >= NT  # past the cap the tail forces banking
-    roll_val = None if forced else _roll_value(V, work, next_mask, ti2)
-    bank = forced or roll_val <= t2 + 1e-9
+    won = ti2 >= ri                             # tally covers the need: banking wins
+    if won:
+        action, roll_turns, bank_turns, clear = "bank", None, 1.0, 1.0
+    else:
+        bank_turns = 1.0 + gc[ri - ti2]         # ri - ti2 >= 1
+        roll_turns = _need_roll_value(U, ctx.work, gc, ri, next_mask, ti2)
+        if bank_turns <= roll_turns:            # fewer expected turns to bank: stop short
+            action, clear = "bank", 0.0         # banks below the need -> this turn does not win
+        else:
+            action = "reroll"
+            clear = _need_clear_prob(U, ctx.work, gc, ri, next_mask, ti2)
     return {
         "bust": False,
         "keep": [i for i in range(6) if kept >> i & 1],
         "points": pts,
         "turn_score": t2,
-        "action": "bank" if bank else "reroll",
+        "need": need,
+        "won": won,
+        "action": action,
         "next_mask": next_mask,
         "reroll_count": bin(next_mask).count("1"),
         "hot": kept == mask,
-        "roll_value": None if roll_val is None else round(roll_val, 1),
+        "clear_prob": round(clear, 4),
+        "bank_turns": round(bank_turns, 3),
+        "roll_turns": None if roll_turns is None else round(roll_turns, 3),
+        "clamped": clamped,
     }
 
 
@@ -603,11 +722,23 @@ def _init_worker(grouped):
 def _solve_one(job):
     """One fully-solved set. Module-level and picklable so it can run in a pool.
 
-    Each set is independent, so the exact solve parallelises perfectly.
+    Each set is independent, so the exact solve parallelises perfectly. Builds the
+    work lists once and shares them between the points-max turn solve (turn_ev and
+    its policy tables) and the need-aware curve.
     """
-    index, rows, names = job
-    res = turn_ev(rows, want_policy=True, names=names)
+    index, rows, names, max_target = job
+    work = _work_lists(rows)
+    res = turn_ev(rows, want_policy=True, names=names, work=work)
+    res["need"] = need_curve(rows, max_target=max_target, work=work)
     return index, res
+
+
+def _need_targets(job):
+    """Need-aware g at the given targets for one set. Module-level for the audit
+    pool (see check_filter.py); one need_curve to the largest target answers all."""
+    rows, targets = job
+    g = need_curve(rows, max_target=max(targets))["g"]
+    return {t: g[t // STEP] for t in targets}
 
 
 _POOL = None
@@ -881,7 +1012,8 @@ def rank_combinations(pool, progress=None):
 
 # --- Orchestration ------------------------------------------------------------
 
-def optimize(inventory, dice_lookup, refine=20, progress=None, fill_die=None):
+def optimize(inventory, dice_lookup, refine=20, progress=None, fill_die=None,
+             target=DEFAULT_TARGET, max_target=MAX_TARGET):
     """Rank every legal 6-dice selection, then solve the best `refine` exactly.
 
     inventory: {die name: how many you own}.
@@ -889,7 +1021,17 @@ def optimize(inventory, dice_lookup, refine=20, progress=None, fill_die=None):
     fill_die: the die the game puts in any slot you do not fill yourself. It is
         always available up to a full hand regardless of how many you own, so
         selections using fewer than six special dice are considered too.
+    target: the wager the sets are ranked for -- fewest need-aware turns (g at
+        `target`) wins. Every standard target up to `max_target` is reported so
+        the UI can re-rank without re-solving.
+    max_target: how far to solve the need curve. Defaults to the full 4000;
+        lowering it (never below the smallest standard target) skips the dear tail
+        of the solve when only shorter wagers are of interest.
     """
+    targets = tuple(t for t in NEED_TARGETS if t <= max_target) or (min(NEED_TARGETS),)
+    max_target = max(targets)           # never solve past the furthest reported target
+    if target not in targets:           # only reported targets can be the sort key
+        target = max_target
     pool_names, pool = [], []
     for name, count in sorted(inventory.items()):
         if name == fill_die or count <= 0:
@@ -922,7 +1064,7 @@ def optimize(inventory, dice_lookup, refine=20, progress=None, fill_die=None):
         for i, c in enumerate(counts):
             names.extend([pool_names[i]] * c)
             rows.extend([pool[i][0]] * c)
-        jobs.append((k, rows, names))
+        jobs.append((k, rows, names, max_target))
 
     solved = dict(_solve_many(jobs, note))
 
@@ -930,9 +1072,16 @@ def optimize(inventory, dice_lookup, refine=20, progress=None, fill_die=None):
     for k, (ev1, counts) in enumerate(todo):
         res = solved[k]
         td = res["turn_dist"]
+        g = res["need"]["g"]
         out.append({
             "dice": jobs[k][2],
             "counts": [[pool_names[i], c] for i, c in enumerate(counts) if c],
+            # Need-aware expected turns at every standard wager: the ranking metric.
+            "g": {t: round(g[t // STEP], 3) for t in targets},
+            # The full g curve rides along so the play-along advisor can solve any
+            # single need on demand without re-running the dear need_curve itself.
+            "need_g": g,
+            # Secondary/diagnostic figures kept for comparison.
             "turn_ev": round(res["turn_ev"], 1),
             "turns_to_win": {t: round(v, 2) for t, v in res["turns_to_win"].items()},
             # The mean (turn_ev) alone flatters an aggressive set; ship the shape
@@ -946,10 +1095,10 @@ def optimize(inventory, dice_lookup, refine=20, progress=None, fill_die=None):
             "bank_at": res["bank_at"],
             "shape": res["shape"],
         })
-    # Fewer turns to reach the default wager is the ranking that matters at the
-    # table; turn_ev rides along as a secondary figure. Stage 1 still shortlists
-    # by first-roll EV, a fine proxy for which sets are worth solving exactly.
-    out.sort(key=lambda r: r["turns_to_win"][DEFAULT_TARGET])
+    # Fewest need-aware turns to the chosen wager is the ranking that matters at
+    # the table; turn_ev and the legacy renewal ride along as diagnostics. Stage 1
+    # still shortlists by first-roll EV, a fine proxy for which sets to solve.
+    out.sort(key=lambda r: r["g"][target])
 
     return {
         "results": out,

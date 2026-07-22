@@ -110,24 +110,24 @@ has 38,760 of them). So the app runs two stages:
    shares the face-count distribution of common prefixes, and at depth 5 collapses
    it into a 6-entry vector, so each candidate costs six multiplies. ~0.7s for
    5,005 sets.
-2. Solve the top *N* (default 20) with the full turn DP and re-rank by turn value.
+2. Solve the top *N* (default 20) with the full turn DP and re-rank by the
+   need-aware metric — fewest expected turns to the chosen wager, `g[target]`
+   (see below). `turn_ev` and the legacy renewal ride along as diagnostics.
 
 **This shortlist is a heuristic, and it is the one approximation in the pipeline.**
-`check_filter.py` audits it by brute-forcing the full DP over every set for small
-inventories and reporting where the true optimum sat in the cheap ordering:
+`check_filter.py` audits it by brute-forcing the *exact* metric over every set for
+small inventories and reporting where the true optimum — the set **minimising
+`g[target]`** — sat in the cheap first-roll ordering. It checks a short wager
+(1,500) and a long one (4,000) separately, since the proxy may correlate
+differently with each. Across a hand-picked strong 9-die inventory (84 sets) and
+three random 8-die inventories, at both targets, the g-optimum's **worst position
+on first-roll value was #2** — every shortlist size, down to 4, found it. First-
+roll value tracks the need-aware objective at least as well as it tracked
+`turn_ev`.
 
-| inventory | sets | true optimum ranked |
-|---|---|---|
-| 9 dice | 84 | #1, #1, #2 |
-| 11 dice | 462 | #6, #3 |
-| 13 dice | 1,716 | #1, #1 |
-
-Worst observed is #6, and it does not get worse with inventory size — the #6 is
-variance, not a trend. The default shortlist is 20, which leaves comfortable
-margin, but it **is not a guarantee**. To be certain for a specific inventory,
-run `check_filter.py` on it. The web UI exposes the depth (5 / 10 / 20 / 40); 5
-is enough to beat the #6 worst case only barely, so it trades real safety for
-speed, while 20 is the recommended default.
+The default shortlist is 20, which leaves comfortable margin, but it **is not a
+guarantee**. To be certain for a specific inventory, run `check_filter.py` on it.
+The web UI exposes the depth (5 / 10 / 20 / 40); 20 is the recommended default.
 
 ### Solving in parallel
 
@@ -300,30 +300,75 @@ UI shows these next to `turn_ev` and labels the mean *"under unlimited points-ma
 play"* — a diagnostic, not a score to expect. (The mean equals `turn_ev` by
 construction, which the tests pin.)
 
-### The play-along advisor
+### Need-aware turns to a wager (`g[target]`)
+
+`turn_ev` and its distribution describe *one turn*. What decides a wager is how
+many *turns* a whole game takes — and that depends on the policy. Playing every
+turn for maximum points is wrong once the finish line is close: past the target
+points are worthless, so the right move is to bank the instant a pass would cross
+the line. That is **not** the policy `turn_ev` optimises, so ranking by it (or by
+a renewal over its banked distribution) is ranking by the wrong game.
+
+`need_curve` fixes this exactly. For each remaining need `r` (a multiple of 50 up
+to 4,000) it computes `g[r]` — the expected turns to clear `r` under the policy
+that *minimises* that number, every decision conditioned on `r`. Within a turn it
+is a second DP, the mirror of the points-max one: take the **minimum** expected
+turns instead of the maximum expected points, force banking once the tally covers
+the need, and value a bust at `1 + g[r]` (it ends the turn and you still need `r`).
+That bust term is the only self-reference; since its coefficient is the turn's
+bust probability (< 1), one backward sweep that also accumulates that coefficient
+jumps straight to the fixed point `g[r] = (g'[r] − b·x)/(1 − b)`, and a warm-started
+handful of sweeps per `r` converges to 1e-9. No Monte Carlo, no iteration blow-up.
+
+`g[target]` is the number the app **ranks by** and the headline "turns to win". It
+is always ≤ the legacy renewal over the points-max distribution (the need-aware
+policy is optimal for exactly this objective), and the gap is real: six ordinary
+dice reach 4,000 in **7.82** need-aware turns versus **7.94** for points-max play,
+and strong sets improve more. `g` at every standard wager (1,500 / 2,000 / 2,500 /
+3,000 / 4,000) rides in each result, so the wager selector re-ranks instantly
+without re-solving.
+
+### The play-along advisor (need-aware)
 
 The threshold table answers "when do I stop?", but the question the player
 actually faces each throw is "*which dice* do I set aside?" — and the answer is
 often unintuitive (roll `1,1,5,2,3,6` on a strong set and the optimum keeps a
 single 1, not both 1s and the 5). The tables can't express that, so the UI has a
-*Play along* mode: pick a set, enter what each die shows after every throw, and
-it answers with the exact move — what to set aside, then throw or pass, with the
-EV of each shown.
+*Play along* mode: pick a set, tell it the wager and your banked score, enter
+what each die shows after every throw, and it answers with the exact move — what
+to set aside, then throw or bank.
 
-`advise(rows, mask, faces, t)` reuses the solved value table: it computes the
-roll's `outcome_id`, looks up the legal set-asides in the move table, and picks
-the one maximising `V(remaining hand, t + points)` — the same argmax the
-backward pass scored, so the advice *is* the optimal policy rather than a
-paraphrase of it. A test audits 300 random states against the DP directly. The
-page tracks which physical dice remain (a bitmask) and the round tally between
-calls; the tally is editable so the tool can pick up a turn mid-way. Solved
-tables are cached per set, and the advisor warms the cache when opened, so
-advice is instant by the time faces are entered.
+Crucially the advice is **need-aware**, conditioned on the points you still need
+to win (`need = wager − banked`), not on maximising this turn's points.
+`advise(rows, mask, faces, t, need)` reads the same `U_r` table `need_curve`
+solves: it looks up the legal set-asides in the move table and picks the one
+**minimising** `U_need(remaining hand, t + points)` — the fewest expected turns
+to win, the mirror of the old points-max argmax — then reads throw/bank off the
+same table. The instant a set-aside carries the tally to `≥ need` it scores the
+minimum `U = 1` (banking wins outright), so it is always chosen and banked. This
+is the qualitatively new endgame behaviour: three hundred short of the line the
+advisor banks the moment you cover it, where the points-max policy would gamble
+on. Alongside each recommendation it shows the **chance of clearing the need this
+very turn** under the advice — a forward pass over the solved `U_r`, exact, no
+sampling — and the expected turns each option costs. A test audits 400 random
+states, checking `advise` reproduces the `U_r` argmin *and* the same bank/roll
+call the solver's own comparison makes; the two drifting apart is the exact bug
+class this upgrade exists to kill.
 
-The strategy table itself is worded in the game's own vocabulary: rows count
-the dice you would *throw* (the ones you did not select), and the score to
-compare is the round tally plus the current selection — the middle and bottom
-numbers at the edge of the KCD2 table, added together.
+The page tracks which physical dice remain (a bitmask), the round tally, and the
+banked game total between calls; all three are editable so the tool can pick up a
+game mid-way, and banking or winning rolls the total forward automatically.
+Tables are cached per **(set, wager)**, and because the optimiser already solves
+each set's need curve it **ships that curve to the page**, which hands it back on
+open — so warming the advisor is ~30 ms (just the work lists) rather than the
+~50 s a fresh full solve to 4,000 would cost. A single need is then re-solved on
+demand, warm-started from the curve's own `g[need]`, in a sweep or two.
+
+The strategy table above the advisor still describes the points-max policy (its
+need-aware recomputation is a later task); it is worded in the game's own
+vocabulary: rows count the dice you would *throw* (the ones you did not select),
+and the score to compare is the round tally plus the current selection — the
+middle and bottom numbers at the edge of the KCD2 table, added together.
 
 ## A result worth knowing
 
