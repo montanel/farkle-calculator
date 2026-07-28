@@ -1,6 +1,9 @@
 # Personal
 .claude
 
+# Solver disk cache (deterministic; safe to delete, rebuilt on demand)
+.solve_cache/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -23,7 +23,7 @@ fetch('/api/dice')
     try {
       const saved = JSON.parse(localStorage.getItem(STORE) || '{}');
       for (const [n, c] of Object.entries(saved)) {
-        if (byName[n] && !byName[n].wildcard) owned[n] = c;
+        if (byName[n] && !byName[n].wildcard && n !== fillDie) owned[n] = c;
       }
     } catch { /* corrupt storage is not worth crashing over */ }
     renderAll();
@@ -150,7 +150,10 @@ function ownedTile(d, count) {
 
 function renderList() {
   const q = $('search').value.toLowerCase().trim();
-  const hits = dice.filter((d) => !q || d.name.toLowerCase().includes(q));
+  // The fill die is supplied free in any unfilled slot, so it is always implied --
+  // never something to add to the chest. Keep it out of the catalogue entirely.
+  const hits = dice.filter((d) => d.name !== fillDie
+                                  && (!q || d.name.toLowerCase().includes(q)));
   $('dice-list').innerHTML = hits.map((d) => dieRow(d, owned[d.name] || 0)).join('')
     || '<p class="muted center" style="padding:22px">No dice match that name.</p>';
 }
@@ -231,7 +234,7 @@ $('preset-load').addEventListener('click', () => {
   if (!saved) return;
   owned = {};
   for (const [n, c] of Object.entries(saved)) {
-    if (byName[n] && !byName[n].wildcard) owned[n] = c;
+    if (byName[n] && !byName[n].wildcard && n !== fillDie) owned[n] = c;
   }
   save();
   renderAll();
@@ -251,43 +254,61 @@ $('preset-del').addEventListener('click', () => {
 const STAGE = {
   queued: 'Preparing...',
   ranking: 'Weighing every possible set...',
+  filtering: 'Sifting the strongest sets...',
   // No count yet: the first sets are still in flight and nothing has landed.
   starting: 'Solving the turn exactly...',
   solving: 'Solving the turn exactly...',
 };
 
-/* One continuous bar across both stages, so it never resets to zero midway.
-   Ranking is a small fraction of the work; the exact solve is nearly all of it. */
-const RANK_SHARE = 0.12;
+/* One continuous bar across the three stages, so it never resets to zero midway.
+   Ranking is nearly free; the turn_ev sieve is a modest slice; the exact
+   need-aware solve is most of the wait. */
+const RANK_END = 0.06, FILTER_END = 0.28;
 
 function progressFraction(job) {
   const part = job.total ? job.done / job.total : 0;
-  if (job.stage === 'ranking') return part * RANK_SHARE;
-  if (job.stage === 'starting') return RANK_SHARE;
-  if (job.stage === 'solving') return RANK_SHARE + part * (1 - RANK_SHARE);
+  if (job.stage === 'ranking') return part * RANK_END;
+  if (job.stage === 'filtering') return RANK_END + part * (FILTER_END - RANK_END);
+  if (job.stage === 'starting') return FILTER_END;
+  if (job.stage === 'solving') return FILTER_END + part * (1 - FILTER_END);
   return 0;
 }
 
 function progressText(job) {
   const label = STAGE[job.stage] || 'Working...';
-  return job.stage === 'solving' && job.total
+  return (job.stage === 'solving' || job.stage === 'filtering') && job.total
     ? `${label} ${job.done} of ${job.total}`
     : label;
+}
+
+/* The button itself is the progress bar: clicking dims it, and as the solve
+   advances its original colour recovers left-to-right, so it is a whole button
+   again when done. The fill element masks the *unfilled* (right) part, so its
+   width is the remaining fraction. One control, no layout shift. */
+function setGo(fraction, text) {
+  $('go-fill').style.width = `${((1 - fraction) * 100).toFixed(1)}%`;
+  $('go-label').textContent = text;
+}
+
+function resetGo() {
+  $('go').disabled = false;
+  $('go').classList.remove('busy');
+  $('go-fill').style.width = '0%';
+  $('go-label').textContent = 'Find the Best Set';
 }
 
 function showError(msg) {
   $('error').textContent = msg;
   $('error').style.display = '';
-  $('progress').style.display = 'none';
+  resetGo();
 }
 
-$('go').addEventListener('click', async () => {
+async function run() {
   $('error').style.display = 'none';
   $('results').style.display = 'none';
-  $('progress').style.display = '';
-  $('progress-fill').style.width = '0%';
-  $('progress-label').textContent = STAGE.queued;
   $('go').disabled = true;
+  $('go').classList.add('busy');
+  setGo(0, STAGE.queued);
 
   try {
     const res = await fetch('/api/optimize', {
@@ -300,10 +321,11 @@ $('go').addEventListener('click', async () => {
     if (!res.ok) throw new Error(started.error || 'request failed');
     poll(started.job);
   } catch (err) {
-    $('go').disabled = false;
     showError(err.message);
   }
-});
+}
+
+$('go').addEventListener('click', run);
 
 function poll(jobId) {
   const tick = async () => {
@@ -311,20 +333,14 @@ function poll(jobId) {
     try {
       job = await (await fetch(`/api/job?id=${jobId}`)).json();
     } catch (err) {
-      $('go').disabled = false;
       return showError(`Lost contact with the server: ${err.message}`);
     }
-    if (job.stage === 'error') {
-      $('go').disabled = false;
-      return showError(job.error);
-    }
+    if (job.stage === 'error') return showError(job.error);
     if (job.stage === 'done') {
-      $('go').disabled = false;
-      $('progress').style.display = 'none';
+      resetGo();
       return render(job.result);
     }
-    $('progress-label').textContent = progressText(job);
-    $('progress-fill').style.width = `${(progressFraction(job) * 100).toFixed(1)}%`;
+    setGo(progressFraction(job), progressText(job));
     setTimeout(tick, 150);
   };
   tick();
@@ -332,177 +348,104 @@ function poll(jobId) {
 
 // --- results -----------------------------------------------------------------
 
-const ROLL_ON = '<span class="always">always throw</span>';
+const pct = (x) => (x == null ? '&mdash;' : `${Math.round(x * 100)}%`);
 
-/* One safe number per row. `safe` is the lowest threshold across every hand of
-   that size, so acting on it never rolls past the right moment for the hand you
-   actually hold -- the exact number for your hand is in the breakdown below.
-
-   The two number columns answer different questions and are easy to confuse.
-   "Rolling busts" is the risk you take by rolling that hand -- the one that
-   feels relevant at the table. "Turns end here" is where turns finish, which is
-   dominated by *banking*, so the hand you most often finish on is the one you
-   most often stop on, not the one that kills you. */
-/* Quoted in the caption, so it has to be the real figure for these dice: a set
-   that scores easily can drop the last-die risk well under half. */
-function lastDieRisk(shape) {
-  const r = shape.by_size[1].bust_if_roll;
-  return r === null ? 'almost none' : `${(r * 100).toFixed(0)}%`;
-}
-
-/* One row per count of thrown dice, expandable in place: the headline number is
-   the safe one (lowest across every hand of that size), and clicking the row
-   unfolds which specific dice carry which exact number. */
-function strategyRows(bankAt, shape) {
-  const bySize = bankAt.by_size;
-  const hands = {};
-  for (const h of bankAt.hands) (hands[h.n] = hands[h.n] || []).push(h);
-
-  let out = `
-    <tr class="colhead">
-      <th>you'd throw</th><th>what to do</th>
-      <th class="freq">the throw busts</th>
-    </tr>`;
-  for (let n = 6; n >= 1; n--) {
-    const s = bySize[n] || {};
-    const roll = s.safe === null || s.safe === undefined;
-    const ends = shape ? shape[n] : null;
-    const risk = ends && ends.bust_if_roll !== null ? ends.bust_if_roll * 100 : null;
-    const hs = hands[n] || [];
-    out += `
-      <tr class="sizerow" data-n="${n}"
-          title="Show the exact number for each hand of ${n}">
-        <th><span class="caret">&#9656;</span>${n} ${n === 1 ? 'die' : 'dice'}</th>
-        <td>${roll ? ROLL_ON
-          : `throw below <span class="num">${s.safe.toLocaleString()}</span> &mdash; pass at or above`}</td>
-        <td class="freq">${risk === null ? ''
-          : `<span class="${risk >= 50 ? 'risky' : ''}">${risk.toFixed(0)}%</span>`}</td>
-      </tr>`;
-    out += hs.map((h) => `
-      <tr class="subrow sub-${n}">
-        <td class="handcell">${handName(h.dice)}</td>
-        <td>${h.bank === null ? ROLL_ON
-          : `throw below <span class="num">${h.bank.toLocaleString()}</span> &mdash; pass at or above`}</td>
-        <td class="freq"></td>
-      </tr>`).join('');
-  }
-  return out;
-}
-
-/* The shape behind the single "points / turn" mean. `turn_ev` is that mean, and
-   for aggressive sets it is unrepresentative: a big slice of turns bust (bank 0)
-   while a rare hot-dice tail drags the average far above a typical turn. Showing
-   the median, the middle-half range, the bust rate and the mean-when-it-banks
-   makes that skew visible instead of trusting one flattering number. */
-function turnDistBlock(td, turnEv) {
-  if (!td) return '';
-  const n = (x) => Math.round(x).toLocaleString();
-  const pct = (x) => `${(x * 100).toFixed(0)}%`;
-  const cond = td.cond_mean === null || td.cond_mean === undefined
-    ? '&mdash;' : n(td.cond_mean);
+/* The card stat row, all under the NEED-AWARE policy at the selected game-points
+   target (turns to win stays the headline in the summary, so it isn't repeated
+   here): three tiles on one level -- the chance a whole turn banks everything still
+   needed, and the two-sided bust picture. The optimal play gambles hard while far
+   from the target and banks the instant it can, so the bust rate is high early and
+   collapses near the finish. Re-read on every target change, because paintResults()
+   re-renders the list when the dropdown moves. */
+function cardStats(r) {
+  const w = r.win1 ? r.win1[target] : null;
+  const bf = r.bust_far ? r.bust_far[target] : null;
+  const be = r.bust_end;
   return `
-    <div class="turndist">
-      <div class="td-grid">
-        <div class="td-stat">
-          <span class="td-num">${n(td.median)}</span>
-          <span class="td-lab">median turn</span></div>
-        <div class="td-stat">
-          <span class="td-num">${n(td.p25)}&ndash;${n(td.p75)}</span>
-          <span class="td-lab">middle half</span></div>
-        <div class="td-stat">
-          <span class="td-num ${td.bust >= 0.3 ? 'risky' : ''}">${pct(td.bust)}</span>
-          <span class="td-lab">turns bust</span></div>
-        <div class="td-stat">
-          <span class="td-num">${cond}</span>
-          <span class="td-lab">avg when it banks</span></div>
+    <div class="cardstats" title="All at your game-points target, under optimal need-aware play. Win in one turn: the chance a single turn banks the whole target. Bust rates: how often a turn ends in a bust when far from the target versus when under 600 points remain and the play banks as soon as it can.">
+      <div class="cs-tile">
+        <span class="cs-num">${pct(w)}</span>
+        <span class="cs-lab">win in one turn</span>
       </div>
-      <p class="td-note">Mean <b>${n(turnEv)}</b> pts is the average under
-        <em>unlimited points-max play</em> &mdash; pulled up by a rare huge tail,
-        not a score to expect. The <b>median</b> is what a typical turn banks.</p>
+      <div class="cs-tile">
+        <span class="cs-num ${bf >= 0.3 ? 'risky' : ''}">${pct(bf)}</span>
+        <span class="cs-lab">bust rate, far off</span>
+      </div>
+      <div class="cs-tile">
+        <span class="cs-num">${pct(be)}</span>
+        <span class="cs-lab">bust rate, near the win</span>
+      </div>
     </div>`;
 }
 
-/* "Aranka's die, Aranka's die, Fer die" -> "Aranka's die x2, Fer die". */
-function handName(dice) {
-  const seen = new Map();
-  for (const d of dice) seen.set(d, (seen.get(d) || 0) + 1);
-  return [...seen].map(([name, c]) =>
-    esc(name) + (c > 1 ? ` <span class="x">&times;${c}</span>` : '')).join(', ');
+/* The strategy, need-aware at the selected target. For a strong set the policy is a
+   single sentence -- play for the whole thing -- so that is all we show. A weaker
+   set banks early in a few (hand size, need) spots; those become "exception" rows.
+   Either way, the per-hand throw risk follows as its own small table. */
+function strategyPanel(r) {
+  const strat = r.strategy || { simple: true, exceptions: [] };
+  let body;
+  if (strat.simple) {
+    body = `<p class="strat-line">Play for the whole thing: keep throwing until your
+      tally covers what you still need, then pass. This holds at any distance from
+      the target.</p>`;
+  } else {
+    // Collapse repeats: the same (hand size, pass-at) across several needs is one
+    // row, tagged with the smallest need it starts applying from.
+    const groups = new Map();
+    for (const e of strat.exceptions) {
+      const k = `${e.n}|${e.bank}`;
+      const g = groups.get(k);
+      if (!g || e.need < g.need) groups.set(k, { ...e });
+    }
+    const rows = [...groups.values()]
+      .sort((a, b) => b.n - a.n || a.need - b.need)
+      .map((e) => `<li>${e.n} ${e.n === 1 ? 'die' : 'dice'}, needing
+        ${e.need.toLocaleString()}+: pass at
+        <span class="num">${e.bank.toLocaleString()}</span></li>`).join('');
+    body = `<p class="strat-line">Mostly play for the whole thing, but bank early in
+      a few spots where the dice in hand are too few to justify pushing on:</p>
+      <p class="strat-head">Exceptions</p>
+      <ul class="strat-exc">${rows}</ul>`;
+  }
+  return body + riskTable(r);
 }
 
-let lastResults = [];   // the advisor needs the full dice list of a chosen set
-let target = '4000';    // the wager the sets are ranked for, matching #target
+/* "Risk of throwing": the chance a throw of N dice scores nothing, under the
+   need-aware policy at the selected target -- the genuinely useful residue of the
+   old policy tabs. */
+function riskTable(r) {
+  const risk = (r.roll_risk && r.roll_risk[target]) || {};
+  let rows = '';
+  for (let n = 6; n >= 1; n--) {
+    const v = risk[n];
+    rows += `<tr><th>${n} ${n === 1 ? 'die' : 'dice'}</th>
+      <td class="${v >= 0.5 ? 'risky' : ''}">${pct(v)}</td></tr>`;
+  }
+  return `<p class="strat-head">Risk of throwing</p>
+    <table class="risk">${rows}</table>`;
+}
 
-/* Fewest need-aware turns to the chosen wager wins, so g[target] is the sort key.
+let lastResults = [];   // last solve's results, re-sorted client-side on target change
+let target = '4000';    // the game-points target the sets are ranked for, matching #target
+
+/* Fewest need-aware turns to the chosen target wins, so g[target] is the sort key.
    The keys arrive as strings ("4000") because JSON has no integer keys -- `target`
    is kept as a string to match. Re-sorting is client-side: g at every standard
-   wager is in the payload, so changing the wager only reorders, never re-solves. */
+   target is in the payload, so changing it only reorders, never re-solves. */
 function sortResults() {
   lastResults.sort((a, b) => a.g[target] - b.g[target]);
 }
 
 function render(data) {
   lastResults = data.results;
-  for (const r of lastResults) {
-    // The strategy table can be read under four policies: the need-aware one at
-    // three representative needs (far / mid / endgame), then points-max as a
-    // labelled diagnostic. The picker below each set switches between them.
-    r.policies = [...(r.need_strategy || []),
-                  { label: 'pts', need: null, bank_at: r.bank_at, shape: r.shape }];
-  }
   $('results-note').textContent =
-    `Weighed ${data.combinations_ranked.toLocaleString()} sets in ${data.rank_seconds}s, `
-    + `then solved the top ${data.results.length} exactly in ${data.solve_seconds}s.`;
+    `Weighed ${data.combinations_ranked.toLocaleString()} sets, sifted the top `
+    + `${(data.filtered || 0).toLocaleString()} by turn value, then solved the best `
+    + `${data.solved || data.results.length} exactly in ${data.solve_seconds}s.`;
   sortResults();
   paintResults();
   $('results').style.display = '';
-}
-
-const POL_NAME = { far: 'Far', mid: 'Mid-game', end: 'Endgame', pts: 'Points-max' };
-
-/* The picker buttons under a set: the three need levels, then the points-max
-   diagnostic. The active one is re-rendered into the table below. */
-function polButtons(policies, i) {
-  return policies.map((pol, p) => `
-    <button data-i="${i}" data-p="${p}" class="${p === 0 ? 'on' : ''}">
-      ${POL_NAME[pol.label] || pol.label}${pol.need
-        ? ` <span class="polneed">${pol.need.toLocaleString()}</span>` : ''}
-    </button>`).join('');
-}
-
-function policyNote(pol) {
-  if (pol.label === 'pts') {
-    return `<b>Points-max</b> play &mdash; every turn pushed for maximum points,
-      ignoring the wager. A diagnostic: the ranking and <em>Play along</em> use the
-      need-aware policy instead.`;
-  }
-  const where = { far: 'far from the target', mid: 'mid-game', end: 'the endgame' }[pol.label];
-  return `<b>Need-aware</b>, ${where}: about <b>${pol.need.toLocaleString()}</b> still
-    needed to win. Bank the moment your score covers the need; below that, these
-    are the stop points &mdash; far lower than points-max play, which chases
-    points long past the line.`;
-}
-
-function policyOutro(pol) {
-  const noNumber = pol.label === 'pts'
-    ? ' A row with no number means the maths never finds a reason to pass there.'
-    : '';
-  return `<b>The throw busts</b> is the chance that throw scores nothing. A high
-    figure does not make throwing wrong: the threshold already weighs it. Your last
-    die loses everything <span class="num">${lastDieRisk(pol.shape)}</span> of the
-    time, yet throwing it is the only way to refill the table with all six, and that
-    payoff covers the losses. Whole turns end in a bust
-    <span class="num">${(pol.shape.bust * 100).toFixed(0)}%</span> of the time.${noNumber}`;
-}
-
-function renderPolicy(i, p) {
-  const pol = lastResults[i].policies[p];
-  $(`pol-${i}`).innerHTML = `
-    <p class="polnote">${policyNote(pol)}</p>
-    <table class="rows">${strategyRows(pol.bank_at, pol.shape.by_size)}</table>
-    <p class="caption">${policyOutro(pol)}</p>`;
-  const picker = document.querySelector(`.polpick[data-i="${i}"]`);
-  if (picker) for (const b of picker.children) b.classList.toggle('on', +b.dataset.p === p);
 }
 
 function paintResults() {
@@ -525,335 +468,37 @@ function paintResults() {
               <div class="rank">${i + 1}</div>
               <div class="setline">${chips}</div>
               <div class="score">
-                <div class="n">${r.g[target].toFixed(1)}</div>
+                <div class="n">${r.g[target].toFixed(2)}</div>
                 <div class="unit">turns to win</div>
-                <div class="sub">${Math.round(r.turn_ev).toLocaleString()} pts / turn</div>
               </div>
             </div>
           </summary>
           <div class="strategy">
-            ${turnDistBlock(r.turn_dist, r.turn_ev)}
-            <p class="playline">
-              <button class="btn-sm play" data-i="${i}">&#9656; Play along &mdash;
-                enter each throw, be told what to keep</button>
-            </p>
-            <p class="caption">
-              Read this at the <b>throw or pass</b> choice &mdash; after you have
-              picked out the dice to set aside, before you press anything. Count
-              the dice that would be thrown (the ones you did <em>not</em> select)
-              and find that row. Your score is this round's tally <em>plus</em>
-              the selection in front of you &mdash; the middle and bottom numbers
-              at the edge of the table, added together. Click a row to see the
-              exact number for each combination of dice.
-              ${usesFill ? `Includes ${plural(fillDie)}, which the game supplies free.` : ''}
-            </p>
-            <p class="pollabel">How much do you still need to win?</p>
-            <div class="polpick" data-i="${i}">${polButtons(r.policies, i)}</div>
-            <div class="poltable" id="pol-${i}"></div>
+            ${cardStats(r)}
+            <details class="more">
+              <summary class="more-sum">Strategy &mdash; when to throw, when to pass</summary>
+              ${strategyPanel(r)}
+              <p class="caption">Your score is the round tally plus the dice you set
+                aside; all figures are for the need-aware play at the selected
+                game-points target.${usesFill ? ` Includes ${plural(fillDie)} (supplied free).` : ''}</p>
+            </details>
           </div>
         </details>`;
     }).join('');
-  // Fill each set's table with its default (far) policy now that the picker
-  // markup exists in the DOM.
-  lastResults.forEach((_, i) => renderPolicy(i, 0));
 }
 
+/* The need curve is now solved only as far as the target (points past it never
+   help), so a higher target than the last solve isn't in the payload to re-rank
+   by -- re-solve for it (cheap for lower targets, and repeats hit the disk cache).
+   A target already covered just reorders client-side, instantly. */
 $('target').addEventListener('change', () => {
   target = $('target').value;
-  if (lastResults.length) { sortResults(); paintResults(); }
-});
-
-// --- play-along advisor ------------------------------------------------------
-// Mirrors one turn of the real game. The page tracks which physical dice are
-// still on the table (a bitmask) and the round tally; each throw, the player
-// enters the faces and the server answers with the DP's own move: what to set
-// aside, then throw or pass.
-
-let adv = null;   // { names[6], g, target, banked, mask, t, faces{}, last }
-
-const JSON_HEADERS = { 'Content-Type': 'application/json' };
-
-/* The advice is conditioned on the remaining need, so the advisor tracks the
-   wager and the player's banked game total (need = wager - banked) on top of
-   the within-turn tally. The set's need curve (r.need_g) rides along so the
-   server never re-solves it. */
-function openAdvisor(r) {
-  const tgt = Number(target) || 4000;   // open at the wager the results are ranked for
-  adv = { names: r.dice.slice(), g: r.need_g || null, target: tgt, banked: 0,
-          mask: 63, t: 0, faces: {}, last: null };
-  $('advisor').style.display = '';
-  $('adv-set').innerHTML = r.counts.map(([name, c]) => `
-    <span class="chip" data-name="${esc(name)}">
-      <img src="img/${byName[name] ? byName[name].icon : ''}" alt="">
-      ${esc(name)}${c > 1 ? ` <span class="x">&times;${c}</span>` : ''}
-    </span>`).join('');
-  $('adv-target').value = String(tgt);
-  $('adv-banked').max = tgt;
-  $('adv-banked').value = 0;
-  $('adv-t').value = 0;
-  renderAdvNeed();
-  renderAdvEntry();
-  // Build this (set, wager)'s tables now, while the player enters faces; shipping
-  // the need curve lets the server skip the dear solve.
-  warmAdvisor();
-  $('advisor').scrollIntoView({ behavior: 'smooth' });
-}
-
-const advNeed = () => Math.max(0, adv.target - adv.banked);
-
-function renderAdvNeed() {
-  const need = advNeed();
-  $('adv-need').innerHTML = need > 0
-    ? `need <b>${need.toLocaleString()}</b> to win`
-    : `<b>already won</b> &mdash; you hold ${adv.banked.toLocaleString()}`;
-}
-
-function warmAdvisor() {
-  fetch('/api/advise', { method: 'POST', headers: JSON_HEADERS,
-    body: JSON.stringify({ dice: adv.names, warm: true,
-                           target: adv.target, g: adv.g }) }).catch(() => {});
-}
-
-function syncBanked() {
-  $('adv-banked').value = adv.banked;
-  renderAdvNeed();
-}
-
-function renderAdvEntry() {
-  const n = adv.mask.toString(2).split('1').length - 1;
-  const rows = [];
-  for (let i = 0; i < 6; i++) {
-    if (!(adv.mask >> i & 1)) continue;
-    const d = byName[adv.names[i]];
-    rows.push(`
-      <div class="adie">
-        <img src="img/${d.icon}" alt="">
-        <span class="adie-name" data-name="${esc(d.name)}">${esc(d.name)}</span>
-        <span class="faces">${[1, 2, 3, 4, 5, 6].map((f) =>
-          `<button data-i="${i}" data-face="${f}"
-                   class="${adv.faces[i] === f ? 'sel' : ''}">${f}</button>`).join('')}</span>
-      </div>`);
-  }
-  $('adv-dice').innerHTML = `
-    <p class="adv-sub">You threw ${n} ${n === 1 ? 'die' : 'dice'} &mdash;
-       what did ${n === 1 ? 'it' : 'each'} show?
-       <span class="keyhint">type ${n === 1 ? 'the face' : 'the faces in order'}
-       &middot; Enter asks</span></p>` + rows.join('');
-  $('adv-out').innerHTML = '';
-  adv.last = null;
-  updateAdvGo();
-}
-
-function updateAdvGo() {
-  let missing = false;
-  for (let i = 0; i < 6; i++) {
-    if (adv.mask >> i & 1 && !adv.faces[i]) missing = true;
-  }
-  $('adv-go').disabled = missing;
-}
-
-async function doAdvise() {
-  const faces = {};
-  for (let i = 0; i < 6; i++) if (adv.mask >> i & 1) faces[i] = adv.faces[i];
-  $('adv-go').disabled = true;
-  try {
-    const res = await fetch('/api/advise', { method: 'POST', headers: JSON_HEADERS,
-      body: JSON.stringify({ dice: adv.names, mask: adv.mask, t: adv.t,
-                             banked: adv.banked, target: adv.target, g: adv.g, faces }) });
-    const out = await res.json();
-    if (!res.ok) throw new Error(out.error || `request failed (${res.status})`);
-    adv.last = out;
-    renderAdvice(out);
-  } catch (err) {
-    $('adv-out').innerHTML = `<p class="notice">${esc(err.message)}</p>`;
-  }
-  updateAdvGo();
-}
-
-/* The advice is now in turns-to-win, not points: banking the instant the tally
-   covers the need wins outright, and otherwise the choice is whichever costs
-   fewer expected turns, with the chance of clearing the need this very turn
-   shown alongside. */
-function renderAdvice(o) {
-  if (o.won_already) {
-    $('adv-out').innerHTML = `
-      <div class="advice">
-        <p class="adv-action">You already hold the wager &mdash; the game is won.</p>
-        <p class="adv-ev">Lower "your score so far" to plan an earlier turn.</p>
-      </div>`;
-    return;
-  }
-  if (o.bust) {
-    $('adv-out').innerHTML = `
-      <div class="advice advice--bad">
-        <p class="adv-action">Farkle &mdash; nothing scores.</p>
-        <p class="adv-ev">${o.lost
-          ? `The ${o.lost.toLocaleString()} you had set aside this round is lost.`
-          : 'Nothing was lost but the throw.'}</p>
-        <button id="adv-next" class="btn-sm">Start the next turn</button>
-      </div>`;
-    return;
-  }
-  const keeps = o.keep.map((i) => {
-    const d = byName[adv.names[i]];
-    return `<span class="chip" data-name="${esc(d.name)}">
-      <img src="img/${d.icon}" alt=""> ${esc(d.name)}
-      <span class="rolled">${adv.faces[i]}</span></span>`;
-  }).join('');
-
-  const remaining = Math.max(0, o.need - o.turn_score);
-  const winPct = `${(o.clear_prob * 100).toFixed(0)}%`;
-  const rollVs = `Throwing on wins in about <b>${o.roll_turns}</b> more turns
-    vs ${o.bank_turns} for banking now &mdash; and a <b>${winPct}</b> chance you
-    clear the ${o.need.toLocaleString()} this very turn.`;
-
-  let actionLine, evLine, nextLabel;
-  if (o.won) {
-    actionLine = `Then PASS &mdash; banking ${o.turn_score.toLocaleString()}
-                  reaches the wager. <b>You win.</b>`;
-    evLine = `${o.turn_score.toLocaleString()} clears the
-              ${o.need.toLocaleString()} you needed.`;
-    nextLabel = 'Won &mdash; start a new game';
-  } else if (o.action === 'bank') {
-    actionLine = `Then PASS &mdash; bank the ${o.turn_score.toLocaleString()}.`;
-    evLine = `Banking wins in about <b>${o.bank_turns}</b> more turns on average,
-              fewer than the ${o.roll_turns} throwing on would cost. Still need
-              ${remaining.toLocaleString()} after this.`;
-    nextLabel = `Banked ${o.turn_score.toLocaleString()} &mdash; next turn`;
-  } else if (o.hot) {
-    actionLine = 'Then THROW AGAIN &mdash; hot dice, all six come back.';
-    evLine = rollVs;
-    nextLabel = 'I threw all six &mdash; enter the new roll';
+  if (!lastResults.length) return;
+  if (lastResults.every((r) => r.g[target] != null)) {
+    sortResults();
+    paintResults();
   } else {
-    actionLine = `Then THROW the other ${o.reroll_count}
-                  ${o.reroll_count === 1 ? 'die' : 'dice'}.`;
-    evLine = rollVs;
-    nextLabel = `I threw the ${o.reroll_count} &mdash; enter the new roll`;
-  }
-
-  $('adv-out').innerHTML = `
-    <div class="advice${o.won ? ' advice--win' : ''}">
-      <p class="adv-sub">Set aside these &mdash; worth ${o.points.toLocaleString()},
-         round tally ${o.turn_score.toLocaleString()}:</p>
-      <p class="adv-keep">${keeps}</p>
-      <p class="adv-action">${actionLine}</p>
-      <p class="adv-ev">${evLine}</p>
-      <button id="adv-next" class="btn-sm">${nextLabel}</button>
-    </div>`;
-}
-
-function resetAdvTurn() {
-  adv.mask = 63;
-  adv.t = 0;
-  adv.faces = {};
-  adv.last = null;
-  $('adv-t').value = 0;
-  renderAdvEntry();
-}
-
-$('result-list').addEventListener('click', (e) => {
-  const p = e.target.closest('.play');
-  if (p) return openAdvisor(lastResults[+p.dataset.i]);
-  const pol = e.target.closest('.polpick button');
-  if (pol) return renderPolicy(+pol.dataset.i, +pol.dataset.p);
-  const row = e.target.closest('tr.sizerow');
-  if (row) {
-    row.classList.toggle('open');
-    for (const sub of row.closest('table').querySelectorAll(`.sub-${row.dataset.n}`)) {
-      sub.classList.toggle('show');
-    }
+    run();
   }
 });
 
-$('adv-dice').addEventListener('click', (e) => {
-  const b = e.target.closest('button[data-face]');
-  if (!b) return;
-  adv.faces[+b.dataset.i] = +b.dataset.face;
-  $('adv-out').innerHTML = '';   // a changed roll invalidates old advice
-  adv.last = null;
-  for (const sib of b.parentElement.children) sib.classList.remove('sel');
-  b.classList.add('sel');
-  updateAdvGo();
-});
-
-$('adv-out').addEventListener('click', (e) => {
-  if (e.target.id !== 'adv-next') return;
-  const o = adv.last;
-  if (!o) return resetAdvTurn();
-  if (o.won) {                 // game over: reset the game score and start fresh
-    adv.banked = 0;
-    syncBanked();
-    return resetAdvTurn();
-  }
-  if (o.bust) return resetAdvTurn();     // busted turn: game score unchanged
-  if (o.action === 'bank') {             // banked a partial score: carry it into the game total
-    adv.banked = Math.min(adv.target, adv.banked + o.turn_score);
-    syncBanked();
-    return resetAdvTurn();
-  }
-  adv.mask = o.next_mask;                // rerolling: continue the same turn
-  adv.t = o.turn_score;
-  adv.faces = {};
-  $('adv-t').value = adv.t;
-  renderAdvEntry();
-});
-
-// Changing the wager re-conditions everything; rebuild the server-side tables.
-$('adv-target').addEventListener('change', () => {
-  adv.target = Number($('adv-target').value);
-  $('adv-banked').max = adv.target;
-  if (adv.banked > adv.target) { adv.banked = adv.target; $('adv-banked').value = adv.banked; }
-  renderAdvNeed();
-  $('adv-out').innerHTML = '';
-  adv.last = null;
-  warmAdvisor();
-});
-
-// The banked game total sets the remaining need (need = wager - banked).
-$('adv-banked').addEventListener('change', () => {
-  const v = Math.max(0, Math.min(adv.target,
-    Math.round((+$('adv-banked').value || 0) / 50) * 50));
-  $('adv-banked').value = v;
-  adv.banked = v;
-  renderAdvNeed();
-  $('adv-out').innerHTML = '';
-  adv.last = null;
-});
-
-// The tally is editable so the tool can pick up a turn mid-way, or follow a
-// player who kept different dice than advised.
-$('adv-t').addEventListener('change', () => {
-  const v = Math.max(0, Math.min(10000, Math.round((+$('adv-t').value || 0) / 50) * 50));
-  $('adv-t').value = v;
-  adv.t = v;
-  $('adv-out').innerHTML = '';
-  adv.last = null;
-});
-
-$('adv-go').addEventListener('click', doAdvise);
-$('adv-reset').addEventListener('click', resetAdvTurn);
-wireTips($('advisor'));
-
-// Faces can be typed: digits fill the dice top to bottom, Backspace undoes the
-// last one, Enter asks (or advances to the next throw once advice is shown).
-// Much faster than 36 buttons when the game is running on the other monitor.
-document.addEventListener('keydown', (e) => {
-  if (!adv || $('advisor').style.display === 'none') return;
-  const tag = e.target.tagName;
-  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-  if (e.key >= '1' && e.key <= '6') {
-    for (let i = 0; i < 6; i++) {
-      if (adv.mask >> i & 1 && !adv.faces[i]) { adv.faces[i] = +e.key; break; }
-    }
-    renderAdvEntry();
-  } else if (e.key === 'Backspace') {
-    let last = -1;
-    for (let i = 0; i < 6; i++) if (adv.mask >> i & 1 && adv.faces[i]) last = i;
-    if (last >= 0) { delete adv.faces[last]; renderAdvEntry(); }
-    e.preventDefault();
-  } else if (e.key === 'Enter') {
-    e.preventDefault();   // a focused face button must not also re-trigger
-    if (!$('adv-go').disabled) doAdvise();
-    else if ($('adv-next')) $('adv-next').click();
-  }
-});

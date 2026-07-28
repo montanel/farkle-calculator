@@ -99,7 +99,7 @@ body::before {              /* darken the page so panels read as lit */
           font-size: 26px; letter-spacing: .1em; text-align: center; }
 .bar h2 { font-size: 17px; letter-spacing: .12em; }
 .bar h3 { font-size: 14px; letter-spacing: .12em; }
-/* A header that carries a control on the right -- the wager the sets rank for. */
+/* A header that carries a control on the right -- the game-points target sets rank for. */
 .bar--split { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .target-pick { display: inline-flex; align-items: center; gap: 7px;
                font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
@@ -130,6 +130,7 @@ body::before {              /* darken the page so panels read as lit */
 .search::placeholder { color: #7a8996; font-style: italic; }
 
 .btn {
+  position: relative; overflow: hidden;
   display: block; width: 100%; padding: 12px;
   font-family: inherit; font-size: 16px;
   text-transform: uppercase; letter-spacing: .12em;
@@ -139,6 +140,16 @@ body::before {              /* darken the page so panels read as lit */
 }
 .btn:hover:not(:disabled) { filter: brightness(1.22); }
 .btn:disabled { opacity: .5; cursor: default; }
+
+/* While solving, the button *is* the progress bar. On click it dims all over; the
+   fill is a muted mask over the *unfilled* (right) part, so as the bar advances the
+   button's own red recovers left-to-right and is whole again when it finishes. Keep
+   full opacity (overriding :disabled dimming) and no hover brighten while it works. */
+.btn.busy { opacity: 1; cursor: default; }
+.go-fill { position: absolute; top: 0; bottom: 0; right: 0; width: 0;
+           background: rgba(14, 12, 10, .72);
+           transition: width .3s ease-out; z-index: 0; pointer-events: none; }
+.go-label { position: relative; z-index: 1; }
 
 /* Small buttons hover to the game's painted-gold selected state. */
 .btn-sm {
@@ -323,79 +334,54 @@ select.btn-sm:hover { background: #3d2f1acc; color: var(--gold-bright); }
 
 .strategy { padding: 6px 16px 14px; background: #00000024; }
 
-/* --- Turn-distribution strip ---------------------------------------------- */
-/* The mean (points / turn) flatters an aggressive set; this shows the shape
-   behind it -- median, middle-half spread, bust rate, mean-when-it-banks -- so
-   the skew is impossible to miss. Four equal tiles, wrapping to two on narrow
-   panels. */
-.turndist { padding: 10px 0 4px; border-bottom: 1px solid var(--rule); }
-.td-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-@media (max-width: 560px) { .td-grid { grid-template-columns: repeat(2, 1fr); } }
-.td-stat { text-align: center; padding: 7px 4px;
+/* --- Card stats (need-aware, at the selected game-points target) ---------- */
+/* Three tiles on one level: win-in-one-turn and the two-sided bust picture. */
+.cardstats { padding: 8px 0 2px; display: grid; gap: 8px; cursor: help;
+             grid-template-columns: repeat(3, 1fr); }
+.cs-tile { text-align: center; padding: 9px 4px;
            background: #ffffff07; border: 1px solid #ffffff12; }
-.td-num { display: block; font-size: 19px; color: var(--gold-bright);
+.cs-num { display: block; font-size: 21px; color: var(--gold-bright);
           line-height: 1.1; }
-.td-num.risky { color: #c98f86; }
-.td-lab { display: block; font-size: 10.5px; color: var(--ink-dim);
+.cs-num.risky { color: #c98f86; }
+.cs-lab { display: block; font-size: 10.5px; color: var(--ink-dim);
           letter-spacing: .06em; text-transform: uppercase; margin-top: 4px; }
-.td-note { font-size: 12px; color: var(--ink-dim); font-style: italic;
-           margin: 9px 0 2px; }
-.td-note b { color: var(--gold); font-style: normal; }
-.td-note em { color: var(--value); }
+
+/* --- "Optimal strategy" disclosure ---------------------------------------- */
+.more { margin-top: 10px; border-top: 1px solid var(--rule); }
+.more-sum { cursor: pointer; padding: 9px 0 4px; font-size: 13px;
+            color: var(--gold); letter-spacing: .02em; list-style: none; }
+.more-sum::-webkit-details-marker { display: none; }
+.more-sum::before { content: '\25B8'; color: var(--gold-dim); margin-right: 7px;
+                    display: inline-block; transition: transform .12s; }
+.more[open] > .more-sum::before { transform: rotate(90deg); }
+.more-sum:hover { color: var(--gold-bright); }
 .strategy .caption { font-size: 12.5px; color: var(--ink-dim);
                      font-style: italic; padding: 8px 0; }
 
-/* Policy picker: which remaining-need reading the table shows (far / mid /
-   endgame, then points-max). */
-.pollabel { font-size: 12px; color: var(--ink-dim); letter-spacing: .04em;
-            text-transform: uppercase; margin: 6px 0 5px; }
-.polpick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
-.polpick button {
-  font: inherit; font-size: 13px; color: var(--ink-dim); background: #16202a;
-  border: 1px solid #ffffff22; padding: 4px 10px; cursor: pointer;
-  display: inline-flex; align-items: baseline; gap: 5px;
-}
-.polpick button:hover { border-color: var(--gold-dim); color: var(--ink); }
-.polpick button.on { background: var(--sel); color: var(--sel-ink);
-                     font-weight: 700; border-color: #a88943; }
-.polneed { font-size: 11px; opacity: .8; }
-.polpick button.on .polneed { color: var(--sel-ink); }
-.polnote { font-size: 12.5px; color: var(--value); padding: 4px 0 2px; }
-.polnote b { color: var(--gold-bright); }
-/* Each size row unfolds into the exact hands of that size, in place -- the
-   detail lives where the question ("which five?") comes up. */
-.sizerow { cursor: pointer; }
-.sizerow:hover th, .sizerow:hover td { background: #cbb07c10; }
-.caret { display: inline-block; width: 1em; color: var(--gold-dim);
-         transition: transform .12s; }
-.sizerow.open .caret { transform: rotate(90deg); }
-.subrow { display: none; background: #00000030; }
-.subrow.show { display: table-row; }
-.subrow th { padding-left: 2.2em; font-weight: 400; }
-.subrow td, .subrow th { font-size: 13px; color: var(--ink-dim);
-                         border-top: 1px solid #ffffff0a; }
-/* The specific hand, indented under its "N dice" row and free to wrap so long
-   die names never force the table wide. Kept on the left, like the size row. */
-.subrow .handcell { padding-left: 2.2em; white-space: normal; color: var(--gold); }
-.subrow .handcell .x { color: var(--gold-bright); font-weight: 700; }
+/* One-sentence policy for a strong set, or the exception rows for a set that
+   banks early far from the target. */
+.strat-line { font-size: 13px; color: var(--value); line-height: 1.55;
+              padding: 6px 0 2px; }
+.strat-head { font-size: 11px; color: var(--ink-dim); letter-spacing: .09em;
+              text-transform: uppercase; margin: 12px 0 4px; }
+.strat-exc { margin: 0; padding-left: 18px; }
+.strat-exc li { font-size: 13px; color: var(--value); line-height: 1.6; }
+.strategy .num { color: var(--gold-bright); font-weight: 700; }
 
-/* --- Tables --------------------------------------------------------------- */
+/* "Risk of throwing": one row per hand size, need-aware at the selected target. */
+.risk { border-collapse: collapse; margin-top: 2px; }
+.risk th, .risk td { padding: 4px 16px 4px 0; font-size: 13px; text-align: left; }
+.risk th { color: var(--gold); font-weight: 700; white-space: nowrap; }
+.risk td { color: var(--value); font-variant-numeric: tabular-nums; }
+.risk td.risky { color: #c98f86; }
+
+/* --- "About the numbers" help table --------------------------------------- */
 .rows { width: 100%; border-collapse: collapse; }
 .rows th, .rows td { padding: 6px 10px; font-size: 14px; text-align: left;
                      vertical-align: top; border-top: 1px solid var(--rule); }
 .rows th { color: var(--gold); font-weight: 700; width: 1%; white-space: nowrap; }
 .rows td { color: var(--value); }
 .rows--wide th { width: 22%; white-space: normal; }
-.rows .num { color: var(--gold-bright); font-weight: 700; }
-.rows .always { color: var(--ink-dim); font-style: italic; }
-/* How often a row is reached at all -- right-aligned so it reads as a column
-   of magnitudes rather than competing with the rule itself. */
-.rows .freq { width: 1%; white-space: nowrap; text-align: right;
-              font-size: 12.5px; color: var(--ink-dim); }
-.rows .freq .risky { color: #c98f86; }
-.rows .colhead th { color: var(--ink-dim); font-size: 11px; font-weight: 600;
-                    letter-spacing: .09em; text-transform: uppercase;
-                    border-top: none; }
 
 /* --- Hover tooltip (the game's Item Info card) ---------------------------- */
 #tip {
@@ -420,73 +406,7 @@ select.btn-sm:hover { background: #3d2f1acc; color: var(--gold-bright); }
 .face .pct { color: var(--value); text-align: right; font-family: Consolas, monospace; }
 .face.is-scoring .pip { color: var(--sel); font-weight: 700; }
 
-/* --- Play-along advisor --------------------------------------------------- */
-.playline { padding: 8px 0 2px; }
-/* The advisor is the direct answer to "what do I do?", so its opener reads a
-   notch brighter than the utility buttons around it. */
-.play { color: var(--gold-bright); border-color: var(--gold-dim);
-        background: #3a2e1699; }
-.play:hover:not(:disabled) { background: #4a3c1ecc; }
-
-.adv-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 2px 0 10px;
-             border-bottom: 1px solid var(--rule); }
-.adv-game { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px;
-            padding: 10px 0 6px; font-size: 13px; color: var(--ink-dim); }
-.adv-game input, .adv-game select {
-  font: inherit; font-size: 15px; color: var(--gold-bright); background: #16202a;
-  border: 1px solid var(--gold-dim); padding: 4px 7px;
-}
-.adv-game input { width: 84px; text-align: right; }
-.adv-need { margin-left: auto; font-size: 14px; color: var(--value); }
-.adv-need b { color: var(--gold-bright); }
-.adv-score { display: flex; align-items: center; gap: 10px; padding: 6px 0 10px;
-             font-size: 13px; color: var(--ink-dim);
-             border-top: 1px solid var(--rule); }
-.adv-score input {
-  width: 84px; font: inherit; font-size: 15px; text-align: right;
-  color: var(--gold-bright); background: #16202a;
-  border: 1px solid var(--gold-dim); padding: 4px 7px;
-}
-
-.adv-sub { font-size: 13px; color: var(--ink-dim); margin: 6px 0; }
-
-.adie { display: grid; grid-template-columns: 38px 1fr auto;
-        align-items: center; gap: 10px; padding: 5px 0;
-        border-bottom: 1px solid var(--rule); }
-.adie img { width: 32px; height: 32px;
-            filter: drop-shadow(0 2px 3px rgba(0, 0, 0, .6)); }
-.adie-name { font-size: 15px; color: var(--gold); min-width: 0;
-             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.faces { display: flex; gap: 4px; }
-.faces button {
-  width: 30px; height: 30px; font-family: inherit; font-size: 14px;
-  color: var(--ink-dim); background: #16202a; border: 1px solid #ffffff22;
-  cursor: pointer;
-}
-.faces button:hover { border-color: var(--gold-dim); color: var(--ink); }
-.faces button.sel { background: var(--sel); color: var(--sel-ink);
-                    font-weight: 700; border-color: #a88943; }
-
-.advice { margin-top: 10px; padding: 12px 14px;
-          border: 1px solid var(--gold-dim); background: #00000033; }
-.advice--bad { border-color: #7a3b34; }
-.advice--win { border-color: var(--gold); background: #3a2e1633; }
-.adv-keep { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0 8px; }
-.rolled { display: inline-block; min-width: 17px; padding: 0 3px; margin-left: 4px;
-          text-align: center; background: var(--sel); color: var(--sel-ink);
-          font-weight: 700; border-radius: 2px; }
-.adv-action { font-size: 18px; color: var(--gold-bright);
-              letter-spacing: .03em; margin: 8px 0 4px; }
-.advice--bad .adv-action { color: #e8b3aa; }
-.adv-ev { font-size: 13px; color: var(--value); margin: 4px 0 10px; }
-.adv-ev b { color: var(--gold-bright); }
-
 /* --- Progress & misc ------------------------------------------------------ */
-.progress-track { height: 12px; background: #222d36; border: 1px solid var(--gold-dim); }
-/* Completions arrive in bursts as workers finish together, so ease the width a
-   little longer than the poll interval to smooth the steps into a sweep. */
-.progress-fill { height: 100%; width: 0; transition: width .35s ease-out;
-                 background: linear-gradient(180deg, var(--gold-bright), var(--gold-dim)); }
 .notice { padding: 10px 12px; font-size: 13px;
           background: #4a1614dd; border: 1px solid #9c4340; color: #f3cecd; }
 .muted { color: var(--ink-dim); font-size: 12.5px; }
@@ -499,10 +419,6 @@ select.btn-sm:hover { background: #3d2f1acc; color: var(--gold-bright); }
 .scroll::-webkit-scrollbar-track { background: #1d262ecc; }
 .scroll::-webkit-scrollbar-thumb { background: #6a5730; border: 1px solid #364450; }
 .scroll::-webkit-scrollbar-thumb:hover { background: var(--gold-dim); }
-
-/* Keyboard hint in the advisor; quiet, the way the game footnotes its keys. */
-.keyhint { font-size: 11px; color: #6d7d8d; text-transform: uppercase;
-           letter-spacing: .08em; margin-left: 8px; }
 
 /* Brass corner flourishes framing the whole screen, as the game frames its
    menus. Fixed and non-interactive; purely scenery. */

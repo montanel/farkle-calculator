@@ -8,6 +8,7 @@ Crucially this table depends only on the rules, never on which physical dice
 you own, so it is built once and reused for every 6-dice combination we score.
 """
 
+import hashlib
 from functools import lru_cache
 from itertools import combinations, product
 
@@ -18,6 +19,18 @@ SINGLES = {1: 100, 5: 50}
 STRAIGHTS = [((1, 2, 3, 4, 5, 6), 1500), ((2, 3, 4, 5, 6), 750), ((1, 2, 3, 4, 5), 500)]
 
 FULL_HAND = 0b111111  # all six dice in hand
+
+
+def rules_signature():
+    """A short, stable hash of the scoring rules.
+
+    A cached solve is only valid while the rules that produced it stand, so this
+    goes into every disk-cache key. Any edit to the scoring tables changes the
+    digest and so silently invalidates every stale entry.
+    """
+    payload = repr((sorted(TRIPLE_BASE.items()), sorted(SINGLES.items()),
+                    STRAIGHTS)).encode()
+    return hashlib.sha1(payload).hexdigest()[:12]
 
 
 def _decompositions(counts):

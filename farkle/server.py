@@ -13,8 +13,8 @@ from pathlib import Path
 
 from .dice import (DEFAULT_DIE, DICE, DICE_DESC, DICE_ICON, DICE_PROBS,
                    DICE_WEIGHTS, DICE_WIKI, WILDCARD)
-from .solver import (BANK_CAP, DEFAULT_TARGET, NEED_TARGETS, STEP, advise,
-                     default_workers, groups, optimize, prepare, warm_up)
+from .solver import (DEFAULT_TARGET, NEED_TARGETS, default_workers, groups,
+                     optimize, warm_up)
 
 WEB_ROOT = Path(__file__).parent / "web"
 CONTENT_TYPES = {".html": "text/html", ".js": "text/javascript",
@@ -90,8 +90,6 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, target.read_bytes(), ctype)
 
     def do_POST(self):
-        if self.path == "/api/advise":
-            return self._advise()
         if self.path != "/api/optimize":
             return self._send(404, {"error": "not found"})
 
@@ -99,7 +97,7 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length) or "{}")
         raw = payload.get("inventory", {})
         refine = max(1, min(int(payload.get("refine", 20)), 60))
-        # The wager the sets are ranked for; only standard targets are solved.
+        # The game-points target the sets are ranked for; only standard targets solve.
         try:
             target = int(payload.get("target", DEFAULT_TARGET))
         except (TypeError, ValueError):
@@ -129,62 +127,6 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(target=_run_job, args=(job_id, inventory, refine, target),
                          daemon=True).start()
         return self._send(200, {"job": job_id})
-
-    def _advise(self):
-        """One rolled hand in, the turns-minimising play out. Stateless: the page
-        tracks which dice remain, the round tally, and the game score between
-        calls, and sends the wager plus its own copy of the set's need curve so
-        the server never re-solves it."""
-        length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length) or "{}")
-
-        names = payload.get("dice") or []
-        if len(names) != 6 or any(n not in DICE_PROBS for n in names):
-            return self._send(400, {"error": "dice must be six optimisable dice"})
-        rows = [DICE_PROBS[n] for n in names]
-
-        # The wager the advice is conditioned on; only standard targets are solved.
-        try:
-            target = int(payload.get("target", DEFAULT_TARGET))
-        except (TypeError, ValueError):
-            target = DEFAULT_TARGET
-        if target not in NEED_TARGETS:
-            target = DEFAULT_TARGET
-        # The set's need curve, shipped by the optimiser, so prepare() skips the
-        # dear solve. Ignored if malformed -- prepare() then builds it itself.
-        g = payload.get("g")
-        if g is not None:
-            try:
-                g = [float(x) for x in g]
-            except (TypeError, ValueError):
-                g = None
-
-        # Sent when the advisor opens, so the table build happens while the player
-        # is still clicking faces in, not on their first question.
-        if payload.get("warm"):
-            prepare(rows, target, g)
-            return self._send(200, {"ready": True})
-
-        try:
-            mask = int(payload["mask"])
-            t = int(payload["t"])
-            banked = int(payload.get("banked", 0))
-            faces = {int(k): int(v) for k, v in payload["faces"].items()}
-        except (KeyError, TypeError, ValueError, AttributeError):
-            return self._send(400, {"error": "malformed advise request"})
-
-        mem = [i for i in range(6) if mask >> i & 1]
-        if (not 1 <= mask <= 63 or sorted(faces) != mem
-                or any(not 1 <= f <= 6 for f in faces.values())
-                or not 0 <= t <= BANK_CAP or t % STEP
-                or not 0 <= banked <= target or banked % STEP):
-            return self._send(400, {"error": "malformed advise request"})
-
-        need = target - banked
-        if need <= 0:               # already at or past the wager: the game is won
-            return self._send(200, {"won_already": True, "need": need})
-
-        return self._send(200, advise(rows, mask, faces, t, need, target, g))
 
 
 def main(port=8000, open_browser=True):

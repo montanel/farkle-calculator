@@ -514,106 +514,6 @@ def test_turn_distribution():
           f"{td['median']} < {V[FULL_HAND * ROW]:.0f} < {td['cond_mean']:.0f}")
 
 
-def test_advisor():
-    """The need-aware advisor: the turns-minimising move for one rolled hand.
-
-    Unlike the old points-max advisor, this banks the instant a set-aside covers
-    the remaining need (it wins), so its endgame advice is qualitatively new. The
-    consistency audit is the guard the whole upgrade exists for: `advise` must
-    reproduce the U_r argmin and the bank/roll comparison the solver would make,
-    or the advisor and solver have silently drifted apart.
-    """
-    print("\nPlay-along advisor (need-aware)")
-    fair = [DICE_PROBS["Ordinary die"]] * 6
-    STEP, ROW = solver.STEP, solver.ROW
-    tgt = 800   # small target keeps the shared need curve quick to build
-
-    # Endgame: the need-aware policy banks the moment the tally covers the need.
-    # A 5 set aside lifts 250 -> 300 = need, which wins outright: bank, not roll.
-    r = solver.advise(fair, 0b1, {0: 5}, 250, need=300, target=tgt)
-    check("covering the need wins", (r["won"], r["action"]), (True, "bank"))
-    check("winning throw clears for certain", r["clear_prob"], 1.0)
-    check("kept the scoring 5", (r["keep"], r["points"]), ([0], 50))
-
-    # A full straight covers the need too (1500 >= 800), so even with hot dice
-    # back the play is to bank the win rather than chase points -- the endgame
-    # behaviour the points-max advisor never showed.
-    r = solver.advise(fair, 63, {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6}, 0,
-                      need=tgt, target=tgt)
-    check("straight worth 1500", r["points"], 1500)
-    check("hot dice, but the need is met", (r["hot"], r["won"]), (True, True))
-    check("so bank the win, do not roll on", r["action"], "bank")
-
-    # Far from the target with five dice back, keeping a single 1 and throwing on
-    # is fewer expected turns than banking 100 -- the advisor rolls.
-    r = solver.advise(fair, 63, {0: 1, 1: 2, 2: 3, 3: 4, 4: 6, 5: 6}, 0,
-                      need=tgt, target=tgt)
-    check("kept the lone 1", (r["keep"], r["points"]), ([0], 100))
-    check("far from target: throw on", r["action"], "reroll")
-    ok = r["roll_turns"] < r["bank_turns"] and 0 < r["clear_prob"] < 1
-    if not ok:
-        FAILED.append(f"throw-on economics off: {r}")
-    print(f"  {'ok  ' if ok else 'FAIL'} {'rolling costs fewer turns than banking':<44} "
-          f"{r['roll_turns']} < {r['bank_turns']}, win {r['clear_prob'] * 100:.1f}%")
-
-    # Nothing scores.
-    r = solver.advise(fair, 63, {0: 2, 1: 2, 2: 3, 3: 4, 4: 6, 5: 6}, 300,
-                      need=500, target=tgt)
-    check("farkle detected, pile lost", (r["bust"], r["lost"]), (True, 300))
-
-    # Consistency audit: at every state, `advise` must pick the U_r argmin set-
-    # aside and make the same bank/roll call the solver's own comparison would.
-    import random
-    rng = random.Random(13)
-    ctx = solver.prepare(fair, tgt)
-    mv = solver.moves()
-    bad, cmin, cmax = [], 2.0, -1.0
-    for _ in range(400):
-        need = STEP * rng.randrange(1, tgt // STEP + 1)
-        ri = need // STEP
-        U = ctx.u_table(ri)
-        t = STEP * rng.randrange(0, ri)                 # tally below the need
-        mask = rng.randrange(1, 64)
-        mem = [i for i in range(6) if mask >> i & 1]
-        faces = {i: rng.randrange(1, 7) for i in mem}
-        r = solver.advise(fair, mask, faces, t, need=need, target=tgt)
-        oid = sum((faces[i] - 1) * 6 ** j for j, i in enumerate(mem))
-        opts = mv[mask][oid]
-        if not opts:
-            if not r.get("bust"):
-                bad.append((mask, faces, t, need, "missed farkle"))
-            continue
-        # Independent argmin over set-asides (U = 1 once the tally covers need).
-        best = min(U[nm * ROW + (t + p) // STEP] for nm, p in opts)
-        got = U[r["next_mask"] * ROW + r["turn_score"] // STEP]
-        if abs(got - best) > 1e-9:
-            bad.append((mask, faces, t, need, "not the argmin"))
-        # Independent bank/roll decision from the same table.
-        ti2 = r["turn_score"] // STEP
-        if ti2 >= ri:
-            if not r["won"] or r["action"] != "bank":
-                bad.append((mask, faces, t, need, "should have won"))
-        else:
-            gbank = 1.0 + ctx.g[ri - ti2]
-            ru = solver._need_roll_value(U, ctx.work, ctx.g, ri, r["next_mask"], ti2)
-            want = "bank" if gbank <= ru else "reroll"
-            if r["action"] != want:
-                bad.append((mask, faces, t, need, f"{r['action']} != {want}"))
-        # Bookkeeping: kept and rerolled dice must partition the throw.
-        kept = sum(1 << i for i in r["keep"])
-        legal = (kept | r["next_mask"] == mask if not r["hot"]
-                 else kept == mask and r["next_mask"] == FULL_HAND)
-        if not legal or (kept & r["next_mask"] and not r["hot"]):
-            bad.append((mask, faces, t, need, "kept/reroll not a partition"))
-        cmin, cmax = min(cmin, r["clear_prob"]), max(cmax, r["clear_prob"])
-    check("advice == U_r argmin (400 random states)", bad, [])
-    ok = 0.0 <= cmin <= cmax <= 1.0
-    if not ok:
-        FAILED.append(f"clear_prob out of [0,1]: {cmin}..{cmax}")
-    print(f"  {'ok  ' if ok else 'FAIL'} {'win-this-turn probability stays in [0,1]':<44} "
-          f"{cmin:.3f}..{cmax:.3f}")
-
-
 def test_need_strategy():
     """Need-aware strategy summaries: the far / mid / endgame readings.
 
@@ -766,6 +666,198 @@ def test_pool_and_autofill():
     check("no fill die and too few owned -> no results", empty["results"], [])
 
 
+def test_solve_cache():
+    """The disk cache: keyed by sorted names + rules signature + target, and off
+    when asked. Pure and fast -- no solving, just the store's contract."""
+    print("\nDisk cache")
+    import os
+    import shutil
+    import tempfile
+    from farkle import solvecache
+
+    orig_dir, orig_env = solvecache.CACHE_DIR, os.environ.get("FARKLE_NO_CACHE")
+    tmp = tempfile.mkdtemp()
+    solvecache.CACHE_DIR = pathlib.Path(tmp)
+    os.environ.pop("FARKLE_NO_CACHE", None)               # enable for this test
+    try:
+        sig = solver._CACHE_SIG
+        names = ("Ordinary die",) * 6
+        check("miss on empty cache", solvecache.get("full", sig, names, 400), None)
+        solvecache.put("full", sig, names, {"g": [0, 1, 2]}, 400)
+        check("hit after put", solvecache.get("full", sig, names, 400), {"g": [0, 1, 2]})
+        # A different die order is the same set: names are sorted into the key.
+        check("hit regardless of name order",
+              solvecache.get("full", sig, tuple(reversed(names)), 400), {"g": [0, 1, 2]})
+        check("miss on a different target", solvecache.get("full", sig, names, 800), None)
+        check("miss on a different rules signature",
+              solvecache.get("full", "othersig", names, 400), None)
+        check("miss on a different kind", solvecache.get("tev", sig, names, 400), None)
+
+        os.environ["FARKLE_NO_CACHE"] = "1"               # disabled: no read, no write
+        check("disabled -> read miss", solvecache.get("full", sig, names, 400), None)
+        solvecache.put("full", sig, ("X",) * 6, {"g": [9]}, 400)
+        del os.environ["FARKLE_NO_CACHE"]
+        check("disabled put wrote nothing",
+              solvecache.get("full", sig, ("X",) * 6, 400), None)
+    finally:
+        solvecache.CACHE_DIR = orig_dir
+        if orig_env is None:
+            os.environ.pop("FARKLE_NO_CACHE", None)
+        else:
+            os.environ["FARKLE_NO_CACHE"] = orig_env
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_funnel_shortlist():
+    """The shortlist funnel must never drop the true best set as the chest grows.
+
+    g depends only on a set's own six dice, never on the inventory, so the best
+    achievable g can only improve when the chest gains dice -- a reported best that
+    *worsens* on a superset is a shortlist miss. On dice heavy in 1s and 5s the
+    first-roll values cluster, flooding the top with near-identical strong sets and
+    burying the optimum; the turn_ev sieve is what recovers it. This brute-forces
+    the true optimum at a cheap wager and checks the funnel finds it, for an
+    inventory and a superset of it. Bounded to a small target to stay quick.
+    """
+    print("\nShortlist funnel (need-aware, monotone in the inventory)")
+    solver.warm_up()
+    target = 400
+    subset = ["Weighted die", "Heavenly Kingdom die", "Favourable die",
+              "Grimy die", "Painted die", "Monk's die", "Lucky die", "King's die"]
+    extra = ["Holy Trinity die"]   # one added die -> 28 sets grow to 84
+
+    def rows_of(probs, counts):
+        rows = []
+        for i, c in enumerate(counts):
+            rows.extend([probs[i]] * c)
+        return rows
+
+    def brute_best(names):
+        probs = [DICE_PROBS[n] for n in names]
+        ranked = solver.rank_combinations([(p, 1) for p in probs])
+        jobs = [(rows_of(probs, c), (target,)) for _, c in ranked]
+        gs = list(solver.shared_pool().map(solver._need_targets, jobs))
+        return min(g[target] for g in gs), len(ranked)
+
+    def funnel_best(names, prefilter, shortlist):
+        res = solver.optimize({n: 1 for n in names}, DICE_PROBS, refine=3,
+                              fill_die=None, target=target, max_target=target,
+                              prefilter=prefilter, shortlist=shortlist)
+        return res["results"][0]["g"][target]
+
+    b1, n1 = brute_best(subset)
+    f1 = funnel_best(subset, prefilter=20, shortlist=8)
+    b2, n2 = brute_best(subset + extra)
+    f2 = funnel_best(subset + extra, prefilter=30, shortlist=10)
+
+    # The funnel finds the true optimum at each size (optimize rounds g to 3 dp).
+    close("funnel finds the optimum (subset)", f1, b1, 2e-3)
+    close("funnel finds the optimum (superset)", f2, b2, 2e-3)
+    # The invariant the bug violated: a bigger chest can only lower the best g.
+    ok = b2 <= b1 + 1e-9 and f2 <= f1 + 2e-3
+    if not ok:
+        FAILED.append(f"best g rose on a superset: subset {f1}/{b1}, superset {f2}/{b2}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'best g never worsens on a bigger chest':<44} "
+          f"{f1:.3f} ({n1} sets) -> {f2:.3f} ({n2} sets)")
+
+    # The default (no explicit prefilter/shortlist) funnel -- the exact path the UI
+    # takes -- must also land the optimum, here trivially since the tiny chest keeps
+    # every set. Guards against the defaults regressing to something that misses.
+    fdef = funnel_best(subset + extra, prefilter=None, shortlist=None)
+    close("default funnel finds the optimum", fdef, b2, 2e-3)
+
+
+def test_first_roll_keep():
+    """The adaptive first-roll net scales with the inventory.
+
+    The flooding miss (a strong set buried at first-roll #625 of ~9,800 once copies
+    of a strong die were added) is why the net is no longer a fixed cut: it must
+    grow with the number of candidate sets. This locks in that shape -- keep all of
+    a small chest, a growing share of a large one, past the observed miss depth, and
+    never more than the time-bounding cap -- as a pure, instant check.
+    """
+    print("\nAdaptive first-roll shortlist")
+    fk = solver.first_roll_keep
+    check("keeps every set of a small chest", fk(50), 50)
+    check("floor holds for a medium chest", fk(3000), solver.FIRST_ROLL_KEEP)
+    # Past the observed miss depth (#625 of 9,828) with room to spare.
+    ok = fk(9828) >= 625
+    if not ok:
+        FAILED.append(f"first_roll_keep(9828)={fk(9828)} below the observed miss #625")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'covers the observed miss depth (#625)':<44} "
+          f"keep {fk(9828)} of 9828")
+    check("scales with inventory", fk(20000) > fk(9828), True)
+    check("capped on huge inventories", fk(10_000_000), solver.FIRST_ROLL_CAP)
+    # Monotone non-decreasing: a bigger chest never sieves fewer.
+    sizes = [10, 800, 5000, 9828, 40000, 200000]
+    keeps = [fk(s) for s in sizes]
+    check("monotone non-decreasing in size", keeps, sorted(keeps))
+
+    # The stage-2 sieve horizon must *reach* the ranking target -- a horizon short of
+    # it under-ranks big-turn sets and drops the g-optimum from the shortlist (audited
+    # at target 4,000: turn_ev rank #11 truncated at 3,000 vs #2 target-aligned).
+    for tgt in (1500, 4000):
+        reach = solver.sieve_nt(tgt) * solver.STEP
+        ok = reach >= tgt
+        if not ok:
+            FAILED.append(f"sieve_nt({tgt}) reaches only {reach}, short of the target")
+        print(f"  {'ok  ' if ok else 'FAIL'} {'sieve horizon reaches the target':<44} "
+              f"target {tgt} -> horizon {reach}")
+    check("sieve horizon capped at the full grid", solver.sieve_nt(10_000_000),
+          solver.NT)
+
+
+def test_card_payload():
+    """The set-card figures optimize ships, all under the need-aware policy: the
+    chance a turn banks the whole wager, and the two-sided bust picture. Every
+    ranked set must carry them, in range, with the endgame busting no more than
+    the far-from-target play.
+    """
+    print("\nSet-card payload (need-aware win / bust figures)")
+    res = solver.optimize({"Weighted die": 2, "Die of misfortune": 2}, DICE_PROBS,
+                          refine=4, fill_die=DEFAULT_DIE, target=500, max_target=500)
+    results = res["results"]
+    check("some sets ranked", len(results) > 0, True)
+    check("win1 / bust_far / bust_end all present",
+          all(k in r for r in results for k in ("win1", "bust_far", "bust_end")), True)
+    check("legacy need_strategy dropped from the card",
+          any("need_strategy" in r for r in results), False)
+
+    bad = []
+    for r in results:
+        for field in ("win1", "bust_far"):
+            for t, v in r[field].items():
+                if not 0.0 <= v <= 1.0:
+                    bad.append((field, t, v))
+        if not 0.0 <= r["bust_end"] <= 1.0:
+            bad.append(("bust_end", None, r["bust_end"]))
+        for t, v in r["bust_far"].items():          # spec: endgame busts no more
+            if r["bust_end"] > v + 1e-9:
+                bad.append(("bust_end<=bust_far", t, (r["bust_end"], v)))
+    check("figures in [0,1] and bust_end <= bust_far", bad, [])
+
+    # The strategy summary is well-formed: simple, or exceptions that each bank
+    # strictly below their need.
+    strat_bad = [(i, e) for i, r in enumerate(results)
+                 for e in r["strategy"]["exceptions"] if e["bank"] >= e["need"]]
+    check("strategy exceptions bank below the need", strat_bad, [])
+
+    # Wager-dependence + correctness, straight off the win forward pass: a smaller
+    # need is at least as likely to clear in a single turn.
+    fair = [DICE_PROBS["Ordinary die"]] * 6
+    work = solver._work_lists(fair)
+    g = solver.need_curve(fair, max_target=800, work=work)["g"]
+    _, _, _, u_near = solver.solve_need(work, g, 6, g[6])       # need 300
+    _, _, _, u_far = solver.solve_need(work, g, 16, g[16])      # need 800
+    w_near = solver._need_turn_shape(u_near, work, g, 6)["win"]
+    w_far = solver._need_turn_shape(u_far, work, g, 16)["win"]
+    ok = w_near >= w_far - 1e-9
+    if not ok:
+        FAILED.append(f"win-this-turn should fall as the need grows: {w_near} < {w_far}")
+    print(f"  {'ok  ' if ok else 'FAIL'} {'win-this-turn falls as the wager grows':<44} "
+          f"{w_near:.3f} (r=300) >= {w_far:.3f} (r=800)")
+
+
 def test_montecarlo(trials=200_000):
     """Play the solver's own policy at random and see if it earns what it claims."""
     print(f"\nMonte-Carlo validation ({trials:,} simulated turns per set)")
@@ -821,6 +913,11 @@ def test_montecarlo(trials=200_000):
 
 
 if __name__ == "__main__":
+    # Deterministic and hermetic: no disk cache (test_solve_cache flips it on
+    # against a temp dir of its own).
+    import os
+    os.environ["FARKLE_NO_CACHE"] = "1"
+
     test_scoring()
     test_selection_enumeration()
     test_dice_data()
@@ -829,10 +926,13 @@ if __name__ == "__main__":
     test_turns_to_win()
     test_turn_distribution()
     test_need_curve()
-    test_advisor()
     test_need_strategy()
     test_ranking_matches_bruteforce()
     test_pool_and_autofill()
+    test_solve_cache()
+    test_first_roll_keep()
+    test_funnel_shortlist()
+    test_card_payload()
     if "--slow" in sys.argv:
         test_need_curve_pin()
         test_montecarlo()
