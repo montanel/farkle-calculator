@@ -1,5 +1,7 @@
 # Personal
 .claude
+personal_tests.ipynb
+personal_simulation.py
 
 # Solver disk cache (deterministic; safe to delete, rebuilt on demand)
 .solve_cache/
